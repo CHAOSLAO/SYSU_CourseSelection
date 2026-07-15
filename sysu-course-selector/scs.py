@@ -40,6 +40,9 @@ class course_selector:
     jwxt_url = 'https://jwxt.sysu.edu.cn/jwxt/{}'
     course_list_path = 'choose-course-front-server/classCourseInfo/course/list'
     course_select_path = 'choose-course-front-server/classCourseInfo/course/choose'
+    selected_course_list_path = 'choose-course-front-server/selectedCourse/list'
+    sports_volunteer_list_path = 'choose-course-front-server/selectedCourse/sportsSelectedlist'
+    sports_volunteer_update_path = 'choose-course-front-server/selectedCourse/updateSportsSelectedlist'
     headers = {
         'User-Agent': user_agent,
         'Accept': 'application/json, text/plain, */*',
@@ -50,7 +53,22 @@ class course_selector:
         'choose-course-front-server/stuCollectedCourse/getYearTerm',
     )
 
-    def __init__(self):
+    def __init__(
+        self,
+        concurrent_request=CONCURRENT_REQUEST,
+        delay=DELAY,
+        timeout=TIMEOUT,
+        use_socks5_proxy=USE_SOCKS5_PROXY,
+        socks5_proxy_port=SOCKS5_PROXY_PORT,
+    ):
+        if not 1 <= int(concurrent_request) <= 10:
+            raise CourseSelectorError('Concurrent request count must be between 1 and 10.')
+        if not 1 <= int(delay) <= 60:
+            raise CourseSelectorError('Retry interval must be between 1 and 60 seconds.')
+        if not 2 <= int(timeout) <= 60:
+            raise CourseSelectorError('Network timeout must be between 2 and 60 seconds.')
+        if use_socks5_proxy and not 1 <= int(socks5_proxy_port) <= 65535:
+            raise CourseSelectorError('SOCKS5 proxy port must be between 1 and 65535.')
         logging.basicConfig(
             filename='log3.log',
             level=logging.DEBUG,
@@ -60,18 +78,26 @@ class course_selector:
         cookie_jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
         self.course_list = []
+        self.class_number_by_id = {}
         self.public_key = None
         self.public_key_id = None
         self.semester_year = None
+        self.selection_stage = {}
+        self.event_callback = None
         self.selected_type = 1
         self.selected_category = 21
-        if USE_SOCKS5_PROXY:
-            socks.set_default_proxy(socks.SOCKS5, 'localhost', SOCKS5_PROXY_PORT)
+        self.concurrent_request = int(concurrent_request)
+        self.delay = int(delay)
+        self.timeout = int(timeout)
+        self.use_socks5_proxy = bool(use_socks5_proxy)
+        self.socks5_proxy_port = int(socks5_proxy_port)
+        if self.use_socks5_proxy:
+            socks.set_default_proxy(socks.SOCKS5, 'localhost', self.socks5_proxy_port)
             socket.socket = socks.socksocket
 
     def __open_s(self, request):
         try:
-            response = self.opener.open(request, timeout=TIMEOUT)
+            response = self.opener.open(request, timeout=self.timeout)
             content = response.read().decode('utf-8', errors='replace')
             result = {'read': content, 'url': response.geturl(), 'info': response.info()}
             logging.debug('response url=%s body=%s', result['url'], result['read'])
@@ -91,6 +117,16 @@ class course_selector:
             'Origin': 'https://jwxt.sysu.edu.cn',
             'Referer': 'https://jwxt.sysu.edu.cn/jwxt/mk/courseSelection/',
         }
+
+    def __emit_event(self, event_type, **details):
+        """Report background selection activity to an optional UI observer."""
+        callback = self.event_callback
+        if callback is None:
+            return
+        try:
+            callback({'type': event_type, **details})
+        except Exception as error:
+            logging.warning('selection event callback failed: %s', error)
 
     @staticmethod
     def __json(body, action):
@@ -176,29 +212,60 @@ class course_selector:
         for path in self.info_paths:
             result = self.__request_json(path, 'JWXT session initialization')
             if path.endswith('selectCourseInfo'):
-                self.semester_year = (result.get('data') or {}).get('semesterYear')
+                self.selection_stage = result.get('data') or {}
+                self.semester_year = self.selection_stage.get('semesterYear')
         if not self.semester_year:
             raise CourseSelectorError('JWXT did not return an active course-selection term.')
+
+    @property
+    def sports_volunteer_enabled(self):
+        """Whether JWXT currently accepts ranked PE volunteers.
+
+        The official selection page enables PE volunteers only when the course
+        selection type is active and the stage is 1 or 2 (pre-selection).
+        """
+        return (
+            str(self.selection_stage.get('courseSelectType')) != '0'
+            and self.is_preselection_stage
+        )
+
+    @property
+    def is_preselection_stage(self):
+        """Whether the current JWXT stage is a pre-selection/screening stage."""
+        return str(self.selection_stage.get('electiveCourseStageCode')) in ('1', '2')
+
+    @property
+    def selection_stage_name(self):
+        return self.selection_stage.get('electiveCourseStageName') or '未知阶段'
 
     def course_query(self, selected_type=1, selected_category=21):
         if not self.semester_year:
             raise CourseSelectorError('Log in before querying courses.')
         self.selected_type = int(selected_type)
         self.selected_category = int(selected_category)
-        payload = {
-            'pageNo': 1,
-            'pageSize': 20,
-            'param': {
-                'semesterYear': self.semester_year,
-                'selectedType': str(self.selected_type),
-                'selectedCate': str(self.selected_category),
-                'hiddenConflictStatus': '0',
-                'hiddenSelectedStatus': '0',
-                'collectionStatus': '0',
-            },
-        }
-        result = self.__request_json(self.course_list_path, 'Course query', payload)
-        course_data = (result.get('data') or {}).get('rows') or []
+        page_no = 1
+        course_data = []
+        while True:
+            payload = {
+                'pageNo': page_no,
+                'pageSize': 100,
+                'param': {
+                    'semesterYear': self.semester_year,
+                    'selectedType': str(self.selected_type),
+                    'selectedCate': str(self.selected_category),
+                    'hiddenConflictStatus': '0',
+                    'hiddenSelectedStatus': '0',
+                    'collectionStatus': '0',
+                },
+            }
+            result = self.__request_json(self.course_list_path, 'Course query', payload)
+            data = result.get('data') or {}
+            rows = data.get('rows') or []
+            course_data.extend(rows)
+            total = data.get('total')
+            if not rows or total is None or len(course_data) >= int(total):
+                break
+            page_no += 1
         self.course_list = [
             {
                 **item,
@@ -207,13 +274,21 @@ class course_selector:
             }
             for item in course_data
         ]
+        self.class_number_by_id.update({
+            str(item.get('teachingClassId')): item.get('teachingClassNum', '')
+            for item in course_data if item.get('teachingClassId')
+        })
         return [{
             'cid': item.get('courseNum', ''),
             'cname': item.get('courseName', ''),
             'lecturer': (item.get('teachingTimePlace') or '').split(';')[0],
             'sid': item.get('teachingClassId', ''),
+            'class_num': item.get('teachingClassNum', ''),
+            'class_id': item.get('teachingClassId', ''),
             'snum': '{}/{}'.format(item.get('courseSelectedNum', 0), item.get('baseReceiveNum', 0)),
+            'filter_selected_num': item.get('filterSelectedNum'),
             'status': item.get('selectedStatus') == 4 or item.get('selectedStatus') == '4',
+            'selected_status': item.get('selectedStatus'),
         } for item in course_data]
 
     def course_query_categories(self, category_keys):
@@ -221,66 +296,307 @@ class course_selector:
         all_courses = []
         displayed_courses = []
         for category_key in category_keys:
-            _, selected_type, selected_category = self.COURSE_CATEGORIES[category_key]
-            displayed_courses.extend(self.course_query(selected_type, selected_category))
+            category_name, selected_type, selected_category = self.COURSE_CATEGORIES[category_key]
+            courses = self.course_query(selected_type, selected_category)
+            for course in courses:
+                course['category_key'] = category_key
+                course['category_name'] = category_name
+            displayed_courses.extend(courses)
             all_courses.extend(self.course_list)
         self.course_list = all_courses
         return displayed_courses
 
+    def selection_result_query(self, result_type, page_size=100):
+        """Return courses in one of JWXT's selection-result states.
+
+        ``success`` means the course is officially selected, ``failure`` means
+        the selection did not succeed, and ``pending`` means it is waiting for
+        the school's screening/lottery result.  These states are queried from
+        JWXT's selected-course list, rather than inferred from a choose request.
+        """
+        filters = {
+            'success': {
+                'successStatus': '1', 'failureStatus': '0',
+                'retiredClass': '0', 'waitingScreen': '0',
+            },
+            'failure': {
+                'successStatus': '0', 'failureStatus': '1',
+                'retiredClass': '0', 'waitingScreen': '0',
+            },
+            'pending': {
+                'successStatus': '0', 'failureStatus': '0',
+                'retiredClass': '0', 'waitingScreen': '1',
+            },
+        }
+        if result_type not in filters:
+            raise CourseSelectorError('Unknown selection result type: {}'.format(result_type))
+        if not self.semester_year:
+            raise CourseSelectorError('Log in before querying selection results.')
+
+        page_no = 1
+        courses = []
+        while True:
+            result = self.__request_json(
+                self.selected_course_list_path,
+                'Selection result query',
+                {
+                    'pageNo': page_no,
+                    'pageSize': page_size,
+                    'total': True,
+                    'param': filters[result_type],
+                },
+            )
+            data = result.get('data') or {}
+            rows = data.get('rows') or []
+            courses.extend(rows)
+            total = data.get('total')
+            if not rows or total is None or len(courses) >= int(total):
+                break
+            page_no += 1
+
+        return [self.__format_selection_result(item, result_type) for item in courses]
+
+    @staticmethod
+    def __format_selection_result(item, result_type):
+        """Normalize the fields returned by selectedCourse/list for callers."""
+        return {
+            'cid': item.get('courseNum', ''),
+            'cname': item.get('courseName', ''),
+            'class_num': item.get('teachingClassNum') or item.get('clazzNum', ''),
+            'lecturer': item.get('teacherName') or item.get('teachingTeacherName', ''),
+            'schedule': item.get('teachingTimePlace', ''),
+            'selected_num': item.get('selectCount', 0),
+            'capacity': item.get('baseReceiveNum', 0),
+            'status': item.get('status', ''),
+            'result_type': result_type,
+        }
+
+    def selection_results_query(self):
+        """Return all three official selection-result groups in one mapping."""
+        return {
+            result_type: self.selection_result_query(result_type)
+            for result_type in ('success', 'failure', 'pending')
+        }
+
+    def sports_volunteer_query(self):
+        """Return current PE volunteers in official preference order.
+
+        ``studentFilterID`` is the identifier JWXT requires when saving a new
+        order.  It is deliberately kept internal to this client; callers use
+        the displayed teaching-class number or teaching-class ID instead.
+        """
+        if not self.sports_volunteer_enabled:
+            raise CourseSelectorError('体育志愿仅能在预选阶段使用；当前为{}。'.format(self.selection_stage_name))
+        result = self.__request_json(self.sports_volunteer_list_path, 'Sports volunteer query')
+        rows = result.get('data') or []
+        known_classes = dict(self.class_number_by_id)
+        known_classes.update({
+            str(item.get('teachingClassId')): item.get('teachingClassNum', '')
+            for item in self.course_list if item.get('teachingClassId')
+        })
+        volunteers = []
+        for item in rows:
+            if not item.get('studentFilterID'):
+                continue
+            try:
+                rank = int(item.get('volunteerNum') or item.get('sportVolunteer'))
+            except (TypeError, ValueError):
+                continue
+            class_id = item.get('teachingClassId') or item.get('clazzId', '')
+            volunteers.append({
+                'class_num': item.get('teachingClassNum') or known_classes.get(str(class_id), ''),
+                'class_id': class_id,
+                'course_num': item.get('courseNum', ''),
+                'course_name': item.get('courseName', ''),
+                'schedule': item.get('teachingTimePlace', ''),
+                'rank': rank,
+                '_student_filter_id': item.get('studentFilterID'),
+            })
+        return sorted(volunteers, key=lambda item: item['rank'])
+
+    def save_sports_volunteer_order(self, ordered_targets):
+        """Save a complete, ordered list of up to four existing PE volunteers."""
+        if not self.sports_volunteer_enabled:
+            raise CourseSelectorError('当前不是体育预选阶段，不能设置志愿排序。')
+        targets = [str(target).strip() for target in ordered_targets if str(target).strip()]
+        if not 1 <= len(targets) <= 4 or len(set(targets)) != len(targets):
+            raise CourseSelectorError('体育志愿须由 1 至 4 个不重复的教学班号或教学班 ID 组成。')
+        volunteers = self.sports_volunteer_query()
+        if len(volunteers) != len(targets):
+            raise CourseSelectorError('请对当前全部 {} 个体育志愿排序后再保存。'.format(len(volunteers)))
+
+        resolved = []
+        for target in targets:
+            matches = [
+                item for item in volunteers
+                if target in (str(item['class_num']), str(item['class_id']))
+            ]
+            if len(matches) != 1:
+                raise CourseSelectorError('体育志愿中找不到教学班：{}'.format(target))
+            resolved.append(matches[0])
+        if len({item['_student_filter_id'] for item in resolved}) != len(resolved):
+            raise CourseSelectorError('体育志愿排序中存在重复教学班。')
+
+        payload = [
+            {'studentFilterID': item['_student_filter_id'], 'volunteerNum': index}
+            for index, item in enumerate(resolved, start=1)
+        ]
+        self.__request_json(self.sports_volunteer_update_path, 'Sports volunteer order update', payload)
+        return [
+            {key: value for key, value in item.items() if key != '_student_filter_id'}
+            for item in resolved
+        ]
+
     class course_select_thread(threading.Thread):
-        def __init__(self, selector, select_id, selected_type, selected_category):
+        def __init__(self, selector, select_id, selected_type, selected_category, course_label):
             super().__init__()
             self.selector = selector
             self.select_id = select_id
             self.selected_type = selected_type
             self.selected_category = selected_category
+            self.course_label = course_label
 
         def run(self):
-            self.selector.course_select(self.select_id, self.selected_type, self.selected_category)
+            self.selector.course_select(
+                self.select_id, self.selected_type, self.selected_category, self.course_label
+            )
 
-    def course_select(self, select_id, selected_type, selected_category):
+    def course_select(self, select_id, selected_type, selected_category, course_label=''):
+        attempt = 0
+        while True:
+            attempt += 1
+            self.__emit_event(
+                'attempt', course_label=course_label, class_id=str(select_id), attempt=attempt,
+            )
+            try:
+                self.course_select_once(select_id, selected_type, selected_category)
+            except CourseSelectorError as error:
+                logging.warning('course selection request failed: %s', error)
+                self.__emit_event(
+                    'retry', course_label=course_label, class_id=str(select_id), attempt=attempt,
+                    message=str(error), delay=self.delay,
+                )
+                time.sleep(self.delay)
+                continue
+            print('Course selected (or already selected); stopping this request thread.')
+            self.__emit_event(
+                'success', course_label=course_label, class_id=str(select_id), attempt=attempt,
+            )
+            return
+
+    def course_select_once(self, select_id, selected_type, selected_category):
+        """Send one normal selection request without retrying it."""
         payload = {
             'clazzId': str(select_id),
             'selectedType': str(selected_type),
             'selectedCate': str(selected_category),
             'check': True,
         }
-        while True:
-            try:
-                result = self.__request_json(
-                    self.course_select_path,
-                    'Course selection',
-                    payload,
-                    accepted_codes=(200, 52021104),
-                )
-            except CourseSelectorError as error:
-                logging.warning('course selection request failed: %s', error)
-                time.sleep(DELAY)
-                continue
-            if result.get('code') == 200 or result.get('code') == 52021104:
-                print('Course selected (or already selected); stopping this request thread.')
-                return
-            time.sleep(DELAY)
+        return self.__request_json(
+            self.course_select_path,
+            'Course selection',
+            payload,
+            accepted_codes=(200, 52021104),
+        )
 
     def course_select_wrapper(self, target_course_list_str):
-        course_ids = [course_id.strip() for course_id in target_course_list_str.split(',') if course_id.strip()]
-        matching_courses = [
-            item for item in self.course_list if item.get('courseNum') in course_ids
-        ]
-        missing = set(course_ids) - {item.get('courseNum') for item in matching_courses}
+        targets = [target.strip() for target in target_course_list_str.split(',') if target.strip()]
+        if not targets:
+            raise CourseSelectorError('Enter at least one teaching class number or teaching class ID.')
+
+        matching_courses = []
+        missing = []
+        ambiguous_course_numbers = []
+        for target in targets:
+            # JWXT's choose endpoint needs teachingClassId.  teachingClassNum is
+            # the short, user-visible identifier; accept the internal ID too.
+            matches = [
+                item for item in self.course_list
+                if str(item.get('teachingClassNum', '')) == target
+                or str(item.get('teachingClassId', '')) == target
+            ]
+            if not matches:
+                # Retain course-number input only when it identifies one class.
+                course_number_matches = [
+                    item for item in self.course_list if str(item.get('courseNum', '')) == target
+                ]
+                if len(course_number_matches) == 1:
+                    matches = course_number_matches
+                elif len(course_number_matches) > 1:
+                    ambiguous_course_numbers.append(target)
+                    continue
+                else:
+                    missing.append(target)
+                    continue
+            for item in matches:
+                if item not in matching_courses:
+                    matching_courses.append(item)
+
+        messages = []
         if missing:
-            raise CourseSelectorError('Course IDs not found in the current query: {}'.format(', '.join(sorted(missing))))
+            messages.append('未在当前查询中找到：{}'.format(', '.join(sorted(missing))))
+        if ambiguous_course_numbers:
+            messages.append(
+                '课程号存在多个教学班，不能直接选择：{}；请改填教学班号或教学班 ID'.format(
+                    ', '.join(sorted(ambiguous_course_numbers))
+                )
+            )
+        if messages:
+            raise CourseSelectorError('；'.join(messages))
+
+        sports_volunteers = [
+            item for item in matching_courses
+            if self.sports_volunteer_enabled and str(item.get('_selected_type')) == '3'
+        ]
+        normal_courses = [item for item in matching_courses if item not in sports_volunteers]
+        summary = {'sports_volunteer_submitted': [], 'grab_started': []}
+
+        if sports_volunteers:
+            existing_volunteers = self.sports_volunteer_query()
+            existing_class_ids = {str(item['class_id']) for item in existing_volunteers}
+            new_volunteers = [
+                item for item in sports_volunteers
+                if str(item.get('teachingClassId')) not in existing_class_ids
+            ]
+            if len(existing_volunteers) + len(new_volunteers) > 4:
+                raise CourseSelectorError(
+                    '体育预选阶段最多保留 4 个志愿；当前已有 {} 个，新增后会超过上限。'.format(
+                        len(existing_volunteers)
+                    )
+                )
+            # Pre-selection is not a race: send each PE choice once.  The user
+            # can then set its rank through save_sports_volunteer_order().
+            for item in new_volunteers:
+                course_label = self.__course_label(item)
+                self.__emit_event('sports_submitting', course_label=course_label)
+                self.course_select_once(
+                    item['teachingClassId'],
+                    item.get('_selected_type', self.selected_type),
+                    item.get('_selected_category', self.selected_category),
+                )
+                summary['sports_volunteer_submitted'].append(item.get('teachingClassNum', ''))
+                self.__emit_event('sports_submitted', course_label=course_label)
 
         threads = []
-        for item in matching_courses:
-            for _ in range(CONCURRENT_REQUEST):
+        for item in normal_courses:
+            course_label = self.__course_label(item)
+            self.__emit_event('started', course_label=course_label)
+            for _ in range(self.concurrent_request):
                 thread = self.course_select_thread(
                     self,
                     item['teachingClassId'],
                     item.get('_selected_type', self.selected_type),
                     item.get('_selected_category', self.selected_category),
+                    course_label,
                 )
                 thread.start()
                 threads.append(thread)
+            summary['grab_started'].append(item.get('teachingClassNum', ''))
         for thread in threads:
             thread.join()
+        return summary
+
+    @staticmethod
+    def __course_label(item):
+        class_number = item.get('teachingClassNum') or item.get('teachingClassId', '')
+        return '{}（教学班号：{}）'.format(item.get('courseName', ''), class_number)
