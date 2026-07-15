@@ -1,4 +1,0 @@
-<resources>
-    <style name="Theme.SYSUER.DayNight" parent="@style/Theme.SYSUER.Night" />
-    <style name="Theme.SYSUER.Night" parent="Theme.SYSUER.Base" />
-</resources>

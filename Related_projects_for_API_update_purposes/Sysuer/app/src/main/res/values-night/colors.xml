@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="sysu_color">#740003</color>
-    <color name="widget_background">#231815</color>
-    <color name="widget_on_background">#8C8C8C</color>
-    <color name="widget_title_on_background">#ffffff</color>
-</resources>
