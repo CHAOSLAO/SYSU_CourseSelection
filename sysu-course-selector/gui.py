@@ -108,8 +108,13 @@ class CourseSelectorApp(tk.Tk):
         ttk.Button(actions, text='停止选课', command=self.stop_selection).grid(
             row=1, column=5, sticky=tk.E, padx=(8, 0), pady=(10, 0)
         )
+        ttk.Label(
+            actions,
+            text='无需先扫描课程；未知教学班号会自动解析。仅有教学班 ID 时可填：ID@选课类型@选课类别（如 ID@3@10）。',
+            foreground='#666666',
+        ).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(8, 0))
         ttk.Label(actions, textvariable=self.stage_text, foreground='#1f5f99').grid(
-            row=2, column=0, columnspan=5, sticky=tk.W, pady=(10, 0)
+            row=3, column=0, columnspan=5, sticky=tk.W, pady=(10, 0)
         )
         actions.columnconfigure(3, weight=1)
 
@@ -178,6 +183,49 @@ class CourseSelectorApp(tk.Tk):
                 ('课程号', '课程名称', '教学班', '教师', '已选 / 容量', '上课时间地点'),
                 (120, 220, 100, 120, 110, 410),
             )
+
+        force_page = ttk.Frame(notebook, padding=12)
+        notebook.add(force_page, text='强制选课')
+        ttk.Label(
+            force_page,
+            text='教学班 ID 查找笔记',
+            font=('Microsoft YaHei UI', 13, 'bold'),
+        ).pack(anchor=tk.W, pady=(0, 10))
+        force_note = tk.Text(
+            force_page,
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            padx=12,
+            pady=12,
+            font=('Microsoft YaHei UI', 10),
+            spacing1=4,
+            spacing3=8,
+        )
+        force_scrollbar = ttk.Scrollbar(force_page, orient=tk.VERTICAL, command=force_note.yview)
+        force_note.configure(yscrollcommand=force_scrollbar.set)
+        force_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        force_note.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        force_note.insert(tk.END, (
+            '一、如何找到教学班 ID\n\n'
+            '个人可选课程接口只返回当前账号有资格看到的教学班，因此无法从该列表直接找到高年级或其他范围的课程。'
+            '可改用教务系统已有的“全校开课查询”只读接口：\n\n'
+            'schedule/agg/schoolOpeningCoursesSchedule/querySchoolOpeningCourses\n\n'
+            '用学期、课程号和教学班号精确查询。例如：学期 2026-1、课程号 EIT413、教学班号 202613751。'
+            '返回记录中的 class_ID 对应选课接口使用的 teachingClassId / clazzId。\n\n'
+            '为了确认字段含义，可以选择一门同时出现在个人可选列表和全校开课查询中的课程进行对照。'
+            '通信原理 EIT320（教学班号 202613696）在个人选课接口中的 teachingClassId 与全校开课接口中的 '
+            'class_ID 均为 2074439187608080385，证明两个字段指向同一个教学班。\n\n'
+            '二、教学班 ID 的构成特点\n\n'
+            '1. 教学班 ID 是教务系统生成的长十进制内部标识，不能由教学班号直接换算。\n'
+            '2. class_ID 才是教学班 ID；sumClassesID 是汇总班 ID，两者用途不同。\n'
+            '3. 同一教学班的 class_ID 与 sumClassesID 数值可能非常接近，但不能据此推算或替换。\n'
+            '4. 课程 ID、教学班号、汇总班 ID 和教学班 ID 是四种不同标识，选课接口需要 clazzId。\n\n'
+            '三、结论\n\n'
+            '这个方法可以合法、只读地找到教学班 ID，但仅凭 ID 不能实现“强制选课”。选课请求仍会由教务服务器校验年级、培养方案、'
+            '选课范围、时间冲突、容量和选课阶段。若要改变这些资格限制，必须由学校教务端授权或管理员调整权限；客户端不能也不应自行提权。\n\n'
+            '本栏目仅作为开发笔记，不提供绕过权限或强制选课功能。'
+        ))
+        force_note.configure(state=tk.DISABLED)
 
         ttk.Label(outer, textvariable=self.status_text, anchor=tk.W).pack(fill=tk.X, pady=(10, 0))
 
@@ -478,9 +526,6 @@ class CourseSelectorApp(tk.Tk):
         targets = self.target_entry.get().strip()
         if not targets:
             messagebox.showwarning('未填写教学班', '请填写要选的教学班号或教学班 ID。', parent=self)
-            return
-        if not self.selector.course_list:
-            messagebox.showwarning('请先查询', '请先查询课程，再从结果中填写教学班号或教学班 ID。', parent=self)
             return
         self.open_monitor()
         if self.selector.sports_volunteer_enabled:

@@ -1,0 +1,17 @@
+开发备忘
+
+JWXT 选课接口参数对照（2026-07-15）：
+
+1. 专业选修：selectedType=1，selectedCate=21。
+2. 公共必修：selectedType=1，selectedCate=10。
+3. 体育：selectedType=3，selectedCate=10。
+
+选课接口使用 clazzId（内部教学班 ID）提交；教学班号只是用户可见的短编号。若课程不在当前扫描列表中，程序会尝试通过教务接口按教学班号解析其内部 ID。
+
+直接提交格式：教学班ID@选课类型@选课类别。
+示例：
+- 专业选修：教学班ID@1@21
+- 公共必修：教学班ID@1@10
+- 体育：教学班ID@3@10
+
+已确认：EIT413《光通信与光互连》、教学班号 202613751，属于专业选修，对应参数为 selectedType=1、selectedCate=21。

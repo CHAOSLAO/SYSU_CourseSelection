@@ -59,7 +59,10 @@ def main():
         print('正在获取专业选修、公共必修和体育的可选课程清单…')
         course_data = selector.course_query_categories(list(selector.COURSE_CATEGORIES))
         print_courses(selector, course_data)
-        targets = input('输入教学班号或教学班 ID，多个用英文逗号分隔（直接回车跳过选课）：').strip()
+        targets = input(
+            '输入教学班号或教学班 ID，多个用英文逗号分隔；无需先扫描。'
+            '仅有 ID 时可用 ID@选课类型@选课类别（直接回车跳过）：'
+        ).strip()
         if targets:
             summary = selector.course_select_wrapper(targets)
             if summary['sports_volunteer_submitted']:

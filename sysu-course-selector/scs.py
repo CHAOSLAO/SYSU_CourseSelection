@@ -292,29 +292,7 @@ class course_selector:
             raise CourseSelectorError('Log in before querying courses.')
         self.selected_type = int(selected_type)
         self.selected_category = int(selected_category)
-        page_no = 1
-        course_data = []
-        while True:
-            payload = {
-                'pageNo': page_no,
-                'pageSize': 100,
-                'param': {
-                    'semesterYear': self.semester_year,
-                    'selectedType': str(self.selected_type),
-                    'selectedCate': str(self.selected_category),
-                    'hiddenConflictStatus': '0',
-                    'hiddenSelectedStatus': '0',
-                    'collectionStatus': '0',
-                },
-            }
-            result = self.__request_json(self.course_list_path, 'Course query', payload)
-            data = result.get('data') or {}
-            rows = data.get('rows') or []
-            course_data.extend(rows)
-            total = data.get('total')
-            if not rows or total is None or len(course_data) >= int(total):
-                break
-            page_no += 1
+        course_data = self.__query_category_rows(self.selected_type, self.selected_category)
         self.course_list = [
             {
                 **item,
@@ -339,6 +317,73 @@ class course_selector:
             'status': item.get('selectedStatus') == 4 or item.get('selectedStatus') == '4',
             'selected_status': item.get('selectedStatus'),
         } for item in course_data]
+
+    def __query_category_rows(self, selected_type, selected_category):
+        """Read every course row in a category without changing the visible list."""
+        page_no = 1
+        course_data = []
+        while True:
+            payload = {
+                'pageNo': page_no,
+                'pageSize': 100,
+                'param': {
+                    'semesterYear': self.semester_year,
+                    'selectedType': str(selected_type),
+                    'selectedCate': str(selected_category),
+                    'hiddenConflictStatus': '0',
+                    'hiddenSelectedStatus': '0',
+                    'collectionStatus': '0',
+                },
+            }
+            result = self.__request_json(self.course_list_path, 'Course query', payload)
+            data = result.get('data') or {}
+            rows = data.get('rows') or []
+            course_data.extend(rows)
+            total = data.get('total')
+            if not rows or total is None or len(course_data) >= int(total):
+                break
+            page_no += 1
+        return course_data
+
+    def __resolve_unlisted_teaching_class(self, target):
+        """Resolve a visible teaching-class number without relying on self.course_list.
+
+        JWXT's list endpoint needs the internal teachingClassId for the choose
+        request, and its teachingClassNum filter is ignored by the server.  Read
+        the supported category pages directly, then pick exact class-number/ID
+        matches.  This leaves the GUI's current scanned list untouched.
+        """
+        matches = []
+        for _, selected_type, selected_category in self.COURSE_CATEGORIES.values():
+            for item in self.__query_category_rows(selected_type, selected_category):
+                if (
+                    str(item.get('teachingClassNum', '')) == target
+                    or str(item.get('teachingClassId', '')) == target
+                ):
+                    matches.append({
+                        **item,
+                        '_selected_type': selected_type,
+                        '_selected_category': selected_category,
+                    })
+        self.class_number_by_id.update({
+            str(item.get('teachingClassId')): item.get('teachingClassNum', '')
+            for item in matches if item.get('teachingClassId')
+        })
+        return matches
+
+    @staticmethod
+    def __parse_direct_class_id(target):
+        """Parse ``teachingClassId@selectedType@selectedCate`` for direct API use."""
+        parts = [part.strip() for part in target.split('@')]
+        if len(parts) != 3 or not all(parts) or not all(part.isdigit() for part in parts):
+            return None
+        return {
+            'teachingClassId': parts[0],
+            'teachingClassNum': parts[0],
+            'courseName': 'Direct teaching class submission',
+            '_selected_type': int(parts[1]),
+            '_selected_category': int(parts[2]),
+        }
 
     def course_query_categories(self, category_keys):
         """Query one or more configured categories and retain each class's selection metadata."""
@@ -603,6 +648,10 @@ class course_selector:
         missing = []
         ambiguous_course_numbers = []
         for target in targets:
+            direct_class = self.__parse_direct_class_id(target)
+            if direct_class:
+                matching_courses.append(direct_class)
+                continue
             # JWXT's choose endpoint needs teachingClassId.  teachingClassNum is
             # the short, user-visible identifier; accept the internal ID too.
             matches = [
@@ -610,6 +659,10 @@ class course_selector:
                 if str(item.get('teachingClassNum', '')) == target
                 or str(item.get('teachingClassId', '')) == target
             ]
+            if not matches:
+                # Do not require a class to have been scanned into the GUI/CLI
+                # list. Resolve an exact teaching-class number from JWXT now.
+                matches = self.__resolve_unlisted_teaching_class(target)
             if not matches:
                 # Retain course-number input only when it identifies one class.
                 course_number_matches = [
@@ -629,7 +682,11 @@ class course_selector:
 
         messages = []
         if missing:
-            messages.append('未在当前查询中找到：{}'.format(', '.join(sorted(missing))))
+            messages.append(
+                '未能将下列输入解析为教学班号：{}。如已知教学班 ID，可使用 '
+                '“教学班ID@选课类型@选课类别”直接提交，例如 '
+                '2072220589400616960@3@10。'.format(', '.join(sorted(missing)))
+            )
         if ambiguous_course_numbers:
             messages.append(
                 '课程号存在多个教学班，不能直接选择：{}；请改填教学班号或教学班 ID'.format(
