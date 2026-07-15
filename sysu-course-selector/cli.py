@@ -21,23 +21,10 @@ def print_sports_volunteers(selector):
     return volunteers
 
 
-def main():
-    try:
-        selector = course_selector()
-        selector.pre_login()
-        selector.in_login(name, pwd)
-        print('当前选课阶段：{}'.format(selector.selection_stage_name))
-        if selector.sports_volunteer_enabled:
-            print('体育处于预选阶段：最多 4 个志愿，可在选课后设置第一至第四志愿。')
-        else:
-            print('当前为抢选/非预选阶段：体育课程不使用志愿排序，将按普通选课方式持续尝试。')
-        print('查询范围：1=专业选修，2=公共必修，3=体育')
-        selected_categories = input('输入范围，多个编号用英文逗号分隔（默认 1）：').strip() or '1'
-        category_keys = [key.strip() for key in selected_categories.split(',') if key.strip()]
-        invalid_keys = set(category_keys) - set(selector.COURSE_CATEGORIES)
-        if invalid_keys:
-            raise CourseSelectorError('未知查询范围：{}'.format(', '.join(sorted(invalid_keys))))
-        course_data = selector.course_query_categories(category_keys)
+def print_courses(selector, course_data):
+    for category_key, (category_name, _, _) in selector.COURSE_CATEGORIES.items():
+        courses = [course for course in course_data if course.get('category_key') == category_key]
+        print('\n{}（{} 个教学班）'.format(category_name, len(courses)))
         if selector.is_preselection_stage:
             print('{:10}{:12}{:30}{:10}{:10}{:12}{:10}'.format(
                 '课程号', '教学班号', '课程名称', '教师', '已选/容量', '待筛选人数', '已选',
@@ -46,7 +33,7 @@ def main():
             print('{:10}{:12}{:30}{:10}{:10}{:10}'.format(
                 '课程号', '教学班号', '课程名称', '教师', '已选/容量', '已选',
             ))
-        for course in course_data:
+        for course in courses:
             if selector.is_preselection_stage:
                 print('{:10}{:12}{:30}{:10}{:10}{:12}{:10}'.format(
                     course['cid'], course['class_num'], course['cname'], course['lecturer'], course['snum'],
@@ -56,6 +43,22 @@ def main():
                 print('{:10}{:12}{:30}{:10}{:10}{:10}'.format(
                     course['cid'], course['class_num'], course['cname'], course['lecturer'], course['snum'], course['status'],
                 ))
+
+
+def main():
+    selector = None
+    try:
+        selector = course_selector()
+        selector.pre_login()
+        selector.in_login(name, pwd)
+        print('当前选课阶段：{}'.format(selector.selection_stage_name))
+        if selector.sports_volunteer_enabled:
+            print('体育处于预选阶段：最多 4 个志愿，可在选课后设置第一至第四志愿。')
+        else:
+            print('当前为抢选/非预选阶段：体育课程不使用志愿排序，将按普通选课方式持续尝试。')
+        print('正在获取专业选修、公共必修和体育的可选课程清单…')
+        course_data = selector.course_query_categories(list(selector.COURSE_CATEGORIES))
+        print_courses(selector, course_data)
         targets = input('输入教学班号或教学班 ID，多个用英文逗号分隔（直接回车跳过选课）：').strip()
         if targets:
             summary = selector.course_select_wrapper(targets)
@@ -71,6 +74,10 @@ def main():
                     print('已保存 {} 个体育志愿的排序。'.format(len(saved)))
     except CourseSelectorError as error:
         print('无法继续：{}'.format(error))
+    except KeyboardInterrupt:
+        if selector is not None:
+            selector.stop_course_selection()
+        print('\n已发送停止选课指令；当前网络请求结束后将退出。')
 
 
 if __name__ == '__main__':

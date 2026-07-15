@@ -46,6 +46,7 @@ class CourseSelectorApp(tk.Tk):
             for key in course_selector.COURSE_CATEGORIES
         }
         self.result_tables = {}
+        self.result_references = {}
         self._build_interface()
 
     def _build_interface(self):
@@ -104,6 +105,9 @@ class CourseSelectorApp(tk.Tk):
         ttk.Button(actions, text='开始选课', command=self.select_courses).grid(
             row=1, column=4, sticky=tk.E, pady=(10, 0)
         )
+        ttk.Button(actions, text='停止选课', command=self.stop_selection).grid(
+            row=1, column=5, sticky=tk.E, padx=(8, 0), pady=(10, 0)
+        )
         ttk.Label(actions, textvariable=self.stage_text, foreground='#1f5f99').grid(
             row=2, column=0, columnspan=5, sticky=tk.W, pady=(10, 0)
         )
@@ -158,7 +162,12 @@ class CourseSelectorApp(tk.Tk):
 
         results_page = ttk.Frame(notebook, padding=6)
         notebook.add(results_page, text='选课结果')
-        ttk.Button(results_page, text='刷新选课结果', command=self.refresh_results).pack(anchor=tk.E, pady=(0, 6))
+        result_actions = ttk.Frame(results_page)
+        result_actions.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(result_actions, text='刷新选课结果', command=self.refresh_results).pack(side=tk.RIGHT)
+        ttk.Button(result_actions, text='退选当前选中课程', command=self.drop_selected_course).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
         result_notebook = ttk.Notebook(results_page)
         result_notebook.pack(fill=tk.BOTH, expand=True)
         for result_type, title in RESULT_TABS:
@@ -242,8 +251,11 @@ class CourseSelectorApp(tk.Tk):
             self.status_text.set('登录成功，当前选课学期：{}，{}。'.format(
                 selector.semester_year, selector.selection_stage_name,
             ))
-            if selector.sports_volunteer_enabled:
-                self.refresh_volunteers()
+            self._run_in_background(
+                lambda: selector.course_query_categories(list(selector.COURSE_CATEGORIES)),
+                self._initial_courses_ready,
+                '登录后获取可选课程',
+            )
 
         def failed(description, error):
             self.login_button.configure(state=tk.NORMAL)
@@ -257,6 +269,11 @@ class CourseSelectorApp(tk.Tk):
             else:
                 self.after(0, lambda: done(selector))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _initial_courses_ready(self, courses):
+        self._show_courses(courses)
+        if self.selector.sports_volunteer_enabled:
+            self.refresh_volunteers()
 
     def _update_stage_ui(self):
         if self.selector.sports_volunteer_enabled:
@@ -319,13 +336,21 @@ class CourseSelectorApp(tk.Tk):
     def _append_monitor_event(self, event):
         event_type = event['type']
         label = event.get('course_label') or '教学班 {}'.format(event.get('class_id', ''))
-        if event_type == 'started':
+        if event_type == 'stopping':
+            message = '已收到停止选课指令；当前请求结束后不会再重试。'
+        elif event_type == 'stopped':
+            message = '已停止自动选课{}'.format('：{}'.format(label) if event.get('course_label') else '')
+        elif event_type == 'started':
             message = '已启动持续抢选：{}'.format(label)
         elif event_type == 'attempt':
             message = '正在尝试：{}（第 {} 次）'.format(label, event['attempt'])
         elif event_type == 'retry':
-            message = '未成功，{} 秒后重试：{}；原因：{}'.format(
-                event['delay'], label, event.get('message', '未知错误'),
+            message = '暂未选上，{} 秒后重试：{}；原因：{}（{}）'.format(
+                event['delay'], label, event.get('reason', '未知原因'), event.get('message', '未知错误'),
+            )
+        elif event_type == 'failure':
+            message = '选课失败，不再重试：{}；原因：{}（{}）'.format(
+                label, event.get('reason', '未知原因'), event.get('message', '未知错误'),
             )
         elif event_type == 'success':
             message = '选课成功（或已选）：{}'.format(label)
@@ -340,6 +365,9 @@ class CourseSelectorApp(tk.Tk):
         self.monitor_events = self.monitor_events[-500:]
         self._render_monitor()
 
+        if event_type == 'failure':
+            self.status_text.set(message)
+            messagebox.showwarning('选课失败', message, parent=self)
         if event_type == 'success' and event.get('class_id') not in self.successful_class_ids:
             self.successful_class_ids.add(event.get('class_id'))
             self.status_text.set(message)
@@ -465,6 +493,13 @@ class CourseSelectorApp(tk.Tk):
             '选课',
         )
 
+    def stop_selection(self):
+        if not self._require_login():
+            return
+        self.selector.stop_course_selection()
+        self.open_monitor()
+        self.status_text.set('已发送停止选课指令；当前网络请求完成后将停止重试。')
+
     def _selection_finished(self, summary):
         sports = summary.get('sports_volunteer_submitted', [])
         grabbing = summary.get('grab_started', [])
@@ -549,19 +584,64 @@ class CourseSelectorApp(tk.Tk):
         )
 
     def _show_results(self, results):
+        self.result_references = {}
         for result_type, _ in RESULT_TABS:
-            self._replace_rows(self.result_tables[result_type], [
-                (
+            table = self.result_tables[result_type]
+            table.delete(*table.get_children())
+            for index, course in enumerate(results[result_type]):
+                item_id = 'result-{}-{}'.format(result_type, index)
+                self.result_references[item_id] = course
+                table.insert('', tk.END, iid=item_id, values=(
                     course['cid'], course['cname'], course['class_num'], course['lecturer'],
                     '{}/{}'.format(course['selected_num'], course['capacity']), course['schedule'],
-                )
-                for course in results[result_type]
-            ])
+                ))
         self.status_text.set(
             '选课结果已更新：成功 {} 门，失败 {} 门，待筛选 {} 门。'.format(
                 len(results['success']), len(results['failure']), len(results['pending']),
             )
         )
+
+    def drop_selected_course(self):
+        if not self._require_login():
+            return
+        selected = [
+            item_id for table in self.result_tables.values() for item_id in table.selection()
+        ]
+        if len(selected) != 1:
+            messagebox.showwarning('请选择一门课程', '请在“已选成功”或“已选待筛选”列表中选择一门课程。', parent=self)
+            return
+        course = self.result_references.get(selected[0])
+        if course is None or course['result_type'] == 'failure':
+            messagebox.showwarning('不能退选', '只能退选已选成功或待筛选课程。', parent=self)
+            return
+        course_id = course['course_id']
+        class_id = course['class_id']
+        selected_type = course['selected_type']
+        if not course_id or not selected_type:
+            matched = next((
+                item for item in self.selector.course_list
+                if str(item.get('teachingClassId')) == str(class_id)
+            ), None)
+            if matched:
+                course_id = course_id or matched.get('courseId')
+                selected_type = selected_type or matched.get('_selected_type')
+        if not messagebox.askyesno(
+            '确认退选',
+            '确定退选“{}”（教学班号：{}）吗？'.format(course['cname'], course['class_num'] or class_id),
+            parent=self,
+        ):
+            return
+        self.status_text.set('正在提交退课请求…')
+        self._run_in_background(
+            lambda: self.selector.drop_course(course_id, class_id, selected_type),
+            self._drop_finished,
+            '退课',
+        )
+
+    def _drop_finished(self, message):
+        self.status_text.set('退课成功：{}'.format(message))
+        messagebox.showinfo('退课成功', str(message), parent=self)
+        self.refresh_results()
 
     @staticmethod
     def _replace_rows(table, rows):

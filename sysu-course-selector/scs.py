@@ -20,6 +20,17 @@ class CourseSelectorError(RuntimeError):
     """Raised when SYSU's authentication or course-selection APIs reject a request."""
 
 
+class CourseSelectionFailure(CourseSelectorError):
+    """A course-selection rejection with a user-facing category and retry rule."""
+
+    def __init__(self, code, message, reason, retryable):
+        self.code = str(code)
+        self.message = str(message)
+        self.reason = reason
+        self.retryable = retryable
+        super().__init__('{}（{}）'.format(reason, self.message))
+
+
 class course_selector:
     """Client for the current SYSU CAS v3 and JWXT course-selection APIs."""
 
@@ -40,6 +51,7 @@ class course_selector:
     jwxt_url = 'https://jwxt.sysu.edu.cn/jwxt/{}'
     course_list_path = 'choose-course-front-server/classCourseInfo/course/list'
     course_select_path = 'choose-course-front-server/classCourseInfo/course/choose'
+    course_back_path = 'choose-course-front-server/classCourseInfo/course/back'
     selected_course_list_path = 'choose-course-front-server/selectedCourse/list'
     sports_volunteer_list_path = 'choose-course-front-server/selectedCourse/sportsSelectedlist'
     sports_volunteer_update_path = 'choose-course-front-server/selectedCourse/updateSportsSelectedlist'
@@ -84,6 +96,7 @@ class course_selector:
         self.semester_year = None
         self.selection_stage = {}
         self.event_callback = None
+        self.selection_stop_event = threading.Event()
         self.selected_type = 1
         self.selected_category = 21
         self.concurrent_request = int(concurrent_request)
@@ -128,6 +141,11 @@ class course_selector:
         except Exception as error:
             logging.warning('selection event callback failed: %s', error)
 
+    def stop_course_selection(self):
+        """Stop all active retry loops after their current request returns."""
+        self.selection_stop_event.set()
+        self.__emit_event('stopping')
+
     @staticmethod
     def __json(body, action):
         try:
@@ -135,7 +153,7 @@ class course_selector:
         except (TypeError, json.JSONDecodeError) as error:
             raise CourseSelectorError('{} returned an unexpected response.'.format(action)) from error
 
-    def __request_json(self, path, action, payload=None, accepted_codes=(200,)):
+    def __request_json(self, path, action, payload=None, accepted_codes=(200,), error_factory=None):
         data = None if payload is None else json.dumps(payload).encode('utf-8')
         request = urllib.request.Request(
             self.jwxt_url.format(path), data=data, headers=self.__api_headers()
@@ -145,9 +163,40 @@ class course_selector:
             raise CourseSelectorError('{} failed: unable to reach JWXT.'.format(action))
         result = self.__json(response['read'], action)
         if result.get('code') not in accepted_codes:
+            if error_factory is not None:
+                raise error_factory(result)
             message = result.get('message') or result.get('data') or 'unknown JWXT error'
             raise CourseSelectorError('{} failed: {}'.format(action, message))
         return result
+
+    @staticmethod
+    def __selection_failure(result):
+        """Classify the official JWXT rejection codes for useful UI feedback."""
+        code = str(result.get('code', ''))
+        message = result.get('message') or result.get('msg') or result.get('data') or '教务系统未提供说明'
+        message = str(message)
+        full_codes = {'52021132'}
+        time_conflict_codes = {'52021133', '52021134', '52021135', '52021155'}
+        busy_codes = {'52021142', '52021152'}
+        system_limit_codes = {
+            '52021100', '52021102', '52021103',
+            *{'520211{:02d}'.format(number) for number in range(5, 32)},
+            '52021136', '52021137', '52021138', '52021139', '52021140',
+            '52021144', '52021150', '52021151', '52021153', '52021154',
+            '52021156', '52021157', '52021158', '52021159', '52021160',
+            '52021161', '52021162', '52021163', '52021164', '52021170',
+            '52021203',
+        }
+        normalized = message.lower()
+        if code in full_codes or any(word in normalized for word in ('人数已满', '名额已满', '剩余名额不足', '满员', 'student limit', 'vacancies')):
+            return CourseSelectionFailure(code, message, '选课人数已满', True)
+        if code in time_conflict_codes or any(word in normalized for word in ('时间冲突', '课程冲突', '考试冲突', 'schedule conflict', 'cross-campus')):
+            return CourseSelectionFailure(code, message, '与已选课程时间冲突', False)
+        if code in busy_codes or any(word in normalized for word in ('系统繁忙', '请稍后', 'busy')):
+            return CourseSelectionFailure(code, message, '教务系统繁忙', True)
+        if code in system_limit_codes or any(word in normalized for word in ('限制', '不允许', '超过', '未完成评教', '未注册', '欠费', '先修')):
+            return CourseSelectionFailure(code, message, '系统选课限制', False)
+        return CourseSelectionFailure(code, message, '教务系统拒绝选课', True)
 
     def pre_login(self):
         """Fetch the public key required by the current CAS v3 login API."""
@@ -363,6 +412,9 @@ class course_selector:
             'cid': item.get('courseNum', ''),
             'cname': item.get('courseName', ''),
             'class_num': item.get('teachingClassNum') or item.get('clazzNum', ''),
+            'class_id': item.get('teachingClassId') or item.get('clazzId', ''),
+            'course_id': item.get('courseId', ''),
+            'selected_type': item.get('selectedType', ''),
             'lecturer': item.get('teacherName') or item.get('teachingTeacherName', ''),
             'schedule': item.get('teachingTimePlace', ''),
             'selected_num': item.get('selectCount', 0),
@@ -377,6 +429,21 @@ class course_selector:
             result_type: self.selection_result_query(result_type)
             for result_type in ('success', 'failure', 'pending')
         }
+
+    def drop_course(self, course_id, class_id, selected_type):
+        """Drop an already selected or waiting-to-be-screened teaching class."""
+        if not course_id or not class_id or selected_type in (None, ''):
+            raise CourseSelectorError('缺少退课所需的课程 ID、教学班 ID 或选课类别。请先重新查询课程。')
+        result = self.__request_json(
+            self.course_back_path,
+            'Course withdrawal',
+            {
+                'courseId': str(course_id),
+                'clazzId': str(class_id),
+                'selectedType': str(selected_type),
+            },
+        )
+        return result.get('message') or result.get('data') or '退课请求已提交。'
 
     def sports_volunteer_query(self):
         """Return current PE volunteers in official preference order.
@@ -464,19 +531,45 @@ class course_selector:
     def course_select(self, select_id, selected_type, selected_category, course_label=''):
         attempt = 0
         while True:
+            if self.selection_stop_event.is_set():
+                self.__emit_event('stopped', course_label=course_label, class_id=str(select_id))
+                return
             attempt += 1
             self.__emit_event(
                 'attempt', course_label=course_label, class_id=str(select_id), attempt=attempt,
             )
             try:
                 self.course_select_once(select_id, selected_type, selected_category)
+            except CourseSelectionFailure as error:
+                logging.warning('course selection rejected: %s', error)
+                event = {
+                    'course_label': course_label,
+                    'class_id': str(select_id),
+                    'attempt': attempt,
+                    'message': error.message,
+                    'reason': error.reason,
+                    'code': error.code,
+                    'retryable': error.retryable,
+                }
+                if not error.retryable:
+                    self.__emit_event('failure', **event)
+                    print('选课失败（{}）：{}；该原因不会自动重试。'.format(error.reason, error.message))
+                    return
+                self.__emit_event('retry', **event, delay=self.delay)
+                print('暂未选上（{}）：{}；{} 秒后重试。'.format(error.reason, error.message, self.delay))
+                if self.selection_stop_event.wait(self.delay):
+                    self.__emit_event('stopped', course_label=course_label, class_id=str(select_id))
+                    return
+                continue
             except CourseSelectorError as error:
                 logging.warning('course selection request failed: %s', error)
                 self.__emit_event(
                     'retry', course_label=course_label, class_id=str(select_id), attempt=attempt,
-                    message=str(error), delay=self.delay,
+                    message=str(error), reason='网络或服务异常', delay=self.delay,
                 )
-                time.sleep(self.delay)
+                if self.selection_stop_event.wait(self.delay):
+                    self.__emit_event('stopped', course_label=course_label, class_id=str(select_id))
+                    return
                 continue
             print('Course selected (or already selected); stopping this request thread.')
             self.__emit_event(
@@ -497,9 +590,11 @@ class course_selector:
             'Course selection',
             payload,
             accepted_codes=(200, 52021104),
+            error_factory=self.__selection_failure,
         )
 
     def course_select_wrapper(self, target_course_list_str):
+        self.selection_stop_event.clear()
         targets = [target.strip() for target in target_course_list_str.split(',') if target.strip()]
         if not targets:
             raise CourseSelectorError('Enter at least one teaching class number or teaching class ID.')
@@ -567,6 +662,9 @@ class course_selector:
             # Pre-selection is not a race: send each PE choice once.  The user
             # can then set its rank through save_sports_volunteer_order().
             for item in new_volunteers:
+                if self.selection_stop_event.is_set():
+                    self.__emit_event('stopped', course_label=self.__course_label(item))
+                    break
                 course_label = self.__course_label(item)
                 self.__emit_event('sports_submitting', course_label=course_label)
                 self.course_select_once(
@@ -594,6 +692,8 @@ class course_selector:
             summary['grab_started'].append(item.get('teachingClassNum', ''))
         for thread in threads:
             thread.join()
+        if self.selection_stop_event.is_set():
+            self.__emit_event('stopped')
         return summary
 
     @staticmethod
