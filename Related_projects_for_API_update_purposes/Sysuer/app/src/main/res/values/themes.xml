@@ -1,0 +1,72 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <style name="Theme.SYSUER.DayNight" parent="@style/Theme.SYSUER.Light" />
+
+    <style name="Theme.SYSUER.Light" parent="Theme.SYSUER.Base" />
+
+    <style name="Theme.SYSUER.Base" parent="Theme.Material3Expressive.DynamicColors.DayNight.NoActionBar">
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay.Rikka.Material3</item>
+        <item name="editTextPreferenceStyle">@style/Preference.Rikka.EditTextPreference.Material3
+        </item>
+        <item name="seekBarPreferenceStyle">@style/Preference.Rikka.SeekbarPreference.Material3
+        </item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
+        <item name="simpleMenuPreferenceStyle">
+            @style/Preference.Rikka.SimpleMenuPreference.Material3
+        </item>
+        <item name="materialSwitchStyle">@style/Widget.Material3.CompoundButton.MaterialSwitch
+        </item>
+        <item name="switchStyle">@style/Widget.Material3.CompoundButton.MaterialSwitch</item>
+        <item name="android:windowAnimationStyle">@style/fade</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+
+        <item name="colorOnContainerChecked">@color/md_theme_default_light_secondaryContainer</item>
+        <item name="colorOnContainerUnchecked">@color/md_theme_default_light_secondaryContainer
+        </item>
+        <item name="colorSecondaryContainer">@color/md_theme_default_light_secondaryContainer</item>
+        <item name="colorPrimaryContainer">@color/md_theme_default_light_primaryContainer</item>
+    </style>
+
+    <style name="fade">
+        <item name="android:activityOpenEnterAnimation">
+            @android:anim/fade_in
+        </item>
+        <item name="android:activityCloseEnterAnimation">
+            @android:anim/fade_in
+        </item>
+        <item name="android:activityOpenExitAnimation">
+            @android:anim/fade_out
+        </item>
+        <item name="android:activityCloseExitAnimation">
+            @android:anim/fade_out
+        </item>
+    </style>
+
+    <style name="SYSUER.AppBarLayout" parent="Widget.Material3.AppBarLayout">
+        <item name="android:fitsSystemWindows">true</item>
+        <item name="statusBarForeground">@macro/m3_comp_app_bar_container_color</item>
+        <item name="android:outlineSpotShadowColor" tools:targetApi="28">@color/black</item>
+        <item name="android:outlineAmbientShadowColor" tools:targetApi="28">@color/black</item>
+    </style>
+
+    <style name="SYSUER.CollapsingAppBarLayout" parent="Widget.Material3.AppBarLayout">
+        <item name="android:fitsSystemWindows">false</item>
+        <item name="android:outlineSpotShadowColor" tools:targetApi="28">@color/black</item>
+        <item name="android:outlineAmbientShadowColor" tools:targetApi="28">@color/black</item>
+    </style>
+
+    <style name="SYSUER.AppBarLayout.Solid" parent="Widget.Material3.AppBarLayout">
+        <item name="android:fitsSystemWindows">true</item>
+        <item name="statusBarForeground">@macro/m3_comp_app_bar_container_color</item>
+        <item name="android:outlineSpotShadowColor" tools:targetApi="28">@color/black</item>
+        <item name="android:outlineAmbientShadowColor" tools:targetApi="28">@color/black</item>
+    </style>
+
+    <style name="RoundRect">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">4dp</item>
+    </style>
+</resources>

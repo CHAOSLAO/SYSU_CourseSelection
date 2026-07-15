@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+<!--    <color name="teal_700">#018786</color>-->
+    <color name="black">#000000</color>
+    <color name="logo_background">?colorSurfaceContainer</color>
+    <color name="sysu_color">#005826</color>
+    <color name="widget_background">#f1f1f1</color>
+    <color name="widget_on_background">#231815</color>
+    <color name="widget_title_on_background">#005826</color>
+</resources>

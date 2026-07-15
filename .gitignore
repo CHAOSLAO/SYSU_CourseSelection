@@ -1,0 +1,6 @@
+.agents/
+**/info.py
+**/__pycache__/
+*.py[cod]
+*.log
+code.bmp

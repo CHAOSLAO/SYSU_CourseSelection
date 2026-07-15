@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_assistant_evaluation"
+    app:startDestination="@id/assistant_evaluation_query">
+
+    <fragment
+        android:id="@+id/assistant_evaluation_query"
+        android:name="com.sysu.edu.academic.AssistantEvaluationQueryFragment" />
+    <fragment
+        android:id="@+id/assistant_evaluation_result"
+        android:name="com.sysu.edu.academic.AssistantEvaluationResultFragment"/>
+</navigation>

@@ -1,0 +1,288 @@
+<resources>
+    <string-array name="theme">
+        <item>@string/light</item>
+        <item>@string/dark</item>
+        <item>@string/follow_system</item>
+    </string-array>
+    <string-array name="values_2">
+        <item>0</item>
+        <item>1</item>
+    </string-array>
+    <string-array name="values_3">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </string-array>
+    <string-array name="values_4">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+    </string-array>
+    <string-array name="language">
+        <item>中文</item>
+        <item>English</item>
+        <item>@string/follow_system</item>
+    </string-array>
+    <string-array name="home">
+        <item>@string/dashboard</item>
+        <item>@string/service</item>
+        <item>@string/account</item>
+    </string-array>
+    <string-array name="weeks">
+        <item>星期一</item>
+        <item>星期二</item>
+        <item>星期三</item>
+        <item>星期四</item>
+        <item>星期五</item>
+        <item>星期六</item>
+        <item>星期日</item>
+    </string-array>
+    <string-array name="duration">
+        <item>08:00~08:45</item>
+        <item>08:55~09:40</item>
+        <item>10:10~10:55</item>
+        <item>11:05~11:55</item>
+        <item>14:20~15:05</item>
+        <item>15:15~16:00</item>
+        <item>16:30~17:15</item>
+        <item>17:25~18:10</item>
+        <item>19:00~19:45</item>
+        <item>19:55~20:40</item>
+        <item>20:50~21:35</item>
+    </string-array>
+    <string-array name="number">
+        <item>1</item>
+        <item>11</item>
+    </string-array>
+    <string-array name="months">
+        <item>1月</item>
+        <item>2月</item>
+        <item>3月</item>
+        <item>4月</item>
+        <item>5月</item>
+        <item>6月</item>
+        <item>7月</item>
+        <item>8月</item>
+        <item>9月</item>
+        <item>10月</item>
+        <item>11月</item>
+        <item>12月</item>
+    </string-array>
+    <string-array name="font_size">
+        <item>@string/follow_system</item>
+        <item>小</item>
+        <item>较小</item>
+        <item>正常</item>
+        <item>较大</item>
+        <item>大</item>
+    </string-array>
+    <string-array name="values_6">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+    </string-array>
+    <string-array name="registration_info">
+        <item>今年注册记录</item>
+        <item>缴费信息</item>
+        <item>往年注册记录</item>
+    </string-array>
+    <string-array name="todo_base_type">
+        <item>作业</item>
+        <item>考试</item>
+        <item>会议</item>
+        <item>讲座</item>
+        <item>课程</item>
+        <item>运动</item>
+        <item>志愿</item>
+        <item>其他</item>
+    </string-array>
+    <string-array name="dashboard">
+        <item>@string/shortcut</item>
+        <item>@string/next_class</item>
+        <item>@string/time</item>
+        <item>@string/course_schedule</item>
+        <item>@string/exam</item>
+        <item>@string/todo</item>
+    </string-array>
+    <string-array name="terms">
+        <item>第一学期</item>
+        <item>第二学期</item>
+        <item>第三学期</item>
+    </string-array>
+
+    <string-array name="registration_keys">
+        <item>办理学年</item>
+        <item>离校登记时间</item>
+        <item>工作说明</item>
+        <item>节假日名称</item>
+        <item>节假日日期</item>
+        <item>工作状态</item>
+        <item>状态</item>
+    </string-array>
+
+    <string-array name="registration_info_keys">
+        <item>社会实践</item>
+        <item>科研</item>
+        <item>实习</item>
+        <item>复习</item>
+        <item>其他</item>
+    </string-array>
+
+    <string-array name="course_info_labels">
+        <item>学分</item>
+        <item>教学班代码</item>
+        <item>考查</item>
+        <item>考查方式</item>
+        <item>状态</item>
+        <item>剩余空位</item>
+        <item>待筛选人数</item>
+        <item>选上人数</item>
+    </string-array>
+
+    <!-- 座位信息标签 -->
+    <string-array name="seat_info_labels">
+        <item>总共</item>
+        <item>待筛选</item>
+        <item>选上</item>
+    </string-array>
+    <string-array name="course_type_entries">
+        <item />
+        <item>公必</item>
+        <item>公选</item>
+        <item>专必</item>
+        <item>专选</item>
+    </string-array>
+    <string-array name="course_type_values">
+        <item />
+        <item>3286159</item>
+        <item>3286162</item>
+        <item>3286160</item>
+        <item>3286161</item>
+    </string-array>
+    <string-array name="week_values">
+        <item>一</item>
+        <item>二</item>
+        <item>三</item>
+        <item>四</item>
+        <item>五</item>
+        <item>六</item>
+        <item>日</item>
+    </string-array>
+    <string-array name="check_types">
+        <item />
+        <item>被占用教室</item>
+        <item>空闲教室</item>
+    </string-array>
+    <string-array name="check_type_values">
+        <item />
+        <item>1</item>
+        <item>2</item>
+    </string-array>
+    <string-array name="week_times">
+        <item />
+        <item>每周</item>
+        <item>单周</item>
+        <item>双周</item>
+    </string-array>
+    <string-array name="week_time_values">
+        <item />
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </string-array>
+    <string-array name="occupy_sources">
+        <item />
+        <item>USC临时借用</item>
+        <item>考试占用</item>
+        <item>普通排课</item>
+        <item>教学进度</item>
+        <item>调停课</item>
+        <item>教室占用</item>
+        <item>研究生排课</item>
+        <item>研究生调停课</item>
+        <item>研究生排考</item>
+    </string-array>
+    <string-array name="occupy_source_values">
+        <item />
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+        <item>7</item>
+        <item>8</item>
+        <item>9</item>
+        <item>10</item>
+    </string-array>
+
+    <string-array name="course_outline">
+        <item>课程名称</item>
+        <item>面向专业</item>
+        <item>课程类别</item>
+        <item>课程编码</item>
+        <item>课程id</item>
+        <item>课程细类</item>
+        <item>艺术教育板块</item>
+        <item>课本</item>
+        <item>学分</item>
+        <item>总学时</item>
+        <item>理论学时</item>
+        <item>实践(含实验)学时</item>
+        <item>周学时</item>
+        <item>总学时备注</item>
+        <item>授课语种</item>
+        <item>开课单位</item>
+        <item>接收人数</item>
+        <item>主讲教师</item>
+        <item>意向开课学期</item>
+        <item>意向线下上课校区</item>
+        <item>是否有意向开设跨校园同步课程</item>
+    </string-array>
+    <string-array name="run">
+        <item>开始加载时</item>
+        <item>结束加载时</item>
+        <item>空载时</item>
+        <item>手动运行</item>
+    </string-array>
+    <string-array name="weeks_simple">
+        <item>一</item>
+        <item>二</item>
+        <item>三</item>
+        <item>四</item>
+        <item>五</item>
+        <item>六</item>
+        <item>日</item>
+    </string-array>
+
+    <string-array name="payment_status">
+        <item>待缴费</item>
+        <item>缴费中</item>
+        <item>已缴费</item>
+        <item>缴费失败</item>
+        <item>无需缴费</item>
+    </string-array>
+    <string-array name="priority">
+        <item>无</item>
+        <item>不重要且不紧急</item>
+        <item>不重要但紧急</item>
+        <item>重要但不紧急</item>
+        <item>重要且紧急</item>
+    </string-array>
+    <string-array name="payment_key">
+        <item>待交费用</item>
+        <item>选交费用</item>
+        <item>交费情况</item>
+        <item>付款记录</item>
+        <item>退费记录</item>
+    </string-array>
+    <string-array name="run_at">
+        <item>document-start</item>
+        <item>document-end</item>
+        <item>document-idle</item>
+        <item>manual</item>
+    </string-array>
+</resources>

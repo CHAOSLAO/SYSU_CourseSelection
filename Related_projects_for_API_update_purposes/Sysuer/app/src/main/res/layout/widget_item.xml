@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/item"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    tools:showIn="@layout/widget_next_class">
+
+    <TextView
+        android:layout_width="3dp"
+        android:layout_height="match_parent"
+        android:layout_marginEnd="4dp"
+        android:background="@drawable/widget_divider_background" />
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/title"
+            style="@style/TextAppearance.Material3.TitleMedium.Emphasized"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:ellipsize="middle"
+            android:text="@string/course_name"
+            android:maxLines="2"
+            android:textColor="@color/widget_title_on_background" />
+
+        <TextView
+            android:id="@+id/content"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:lineSpacingExtra="2sp"
+            android:text="@string/course_detail"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:textColor="@color/widget_on_background" />
+    </LinearLayout>
+</LinearLayout>
