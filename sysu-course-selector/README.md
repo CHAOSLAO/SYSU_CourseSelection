@@ -6,7 +6,7 @@
 
 ## ACKNOWLEDGEMENT
 本项目主要功能改编自https://github.com/Siriussee/sysu-course-selector  (MIT Liscence)
-使用了https://github.com/SYSU-Tang/Sysuer的API接口. （Apache 2.0)
+使用了https://github.com/SYSU-Tang/Sysuer 的API接口. （Apache 2.0)
 向两位学长表示感谢。
 
 ## 安装
