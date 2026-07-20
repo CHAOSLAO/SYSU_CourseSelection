@@ -41,6 +41,9 @@ class CourseSelectorApp(tk.Tk):
         self.timeout_var = tk.StringVar(value='5')
         self.proxy_enabled_var = tk.BooleanVar(value=False)
         self.proxy_port_var = tk.StringVar(value='1080')
+        self.stage_mode_var = tk.StringVar(value='')
+        self._last_login_username = None
+        self._last_login_password = None
         self.category_vars = {
             key: tk.BooleanVar(value=True)
             for key in course_selector.COURSE_CATEGORIES
@@ -48,6 +51,7 @@ class CourseSelectorApp(tk.Tk):
         self.result_tables = {}
         self.result_references = {}
         self._build_interface()
+        self.protocol('WM_DELETE_WINDOW', self.exit_app)
 
     def _build_interface(self):
         outer = ttk.Frame(self, padding=14)
@@ -63,6 +67,12 @@ class CourseSelectorApp(tk.Tk):
         self.password_entry.grid(row=0, column=3, sticky=tk.W)
         self.login_button = ttk.Button(login, text='登录', command=self.login)
         self.login_button.grid(row=0, column=4, sticky=tk.W, padx=(16, 0))
+        self.relogin_button = ttk.Button(login, text='重新登录（当前账号）', command=self.relogin)
+        self.relogin_button.grid(row=0, column=5, sticky=tk.W, padx=(8, 0))
+        self.switch_account_button = ttk.Button(login, text='切换账号', command=self.switch_account)
+        self.switch_account_button.grid(row=0, column=6, sticky=tk.W, padx=(8, 0))
+        self.exit_button = ttk.Button(login, text='退出', command=self.exit_app)
+        self.exit_button.grid(row=0, column=7, sticky=tk.W, padx=(8, 0))
         ttk.Label(login, text='并发请求').grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
         ttk.Spinbox(login, from_=1, to=10, width=6, textvariable=self.concurrent_var).grid(
             row=1, column=1, sticky=tk.W, pady=(10, 0)
@@ -82,6 +92,22 @@ class CourseSelectorApp(tk.Tk):
             row=1, column=7, sticky=tk.W, pady=(10, 0)
         )
         ttk.Label(login, text='端口').grid(row=1, column=8, sticky=tk.W, pady=(10, 0), padx=(4, 0))
+        ttk.Label(login, text='当前选课阶段（登录前必选）').grid(
+            row=2, column=0, sticky=tk.W, pady=(10, 0)
+        )
+        self.preselection_mode_button = ttk.Radiobutton(
+            login, text='预选阶段（体育四志愿）', variable=self.stage_mode_var, value='preselection',
+            command=self._preview_stage_mode,
+        )
+        self.preselection_mode_button.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=(10, 0))
+        self.grab_mode_button = ttk.Radiobutton(
+            login, text='抢选阶段（体育自动换课）', variable=self.stage_mode_var, value='grab',
+            command=self._preview_stage_mode,
+        )
+        self.grab_mode_button.grid(row=2, column=3, columnspan=2, sticky=tk.W, pady=(10, 0))
+        ttk.Label(login, text='登录后会与教务当前阶段核对，只显示对应功能。', foreground='#666666').grid(
+            row=2, column=5, columnspan=4, sticky=tk.W, pady=(10, 0)
+        )
         login.columnconfigure(9, weight=1)
 
         actions = ttk.LabelFrame(outer, text='课程查询与选课', padding=10)
@@ -113,12 +139,20 @@ class CourseSelectorApp(tk.Tk):
             text='无需先扫描课程；未知教学班号会自动解析。仅有教学班 ID 时可填：ID@选课类型@选课类别（如 ID@3@10）。',
             foreground='#666666',
         ).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(8, 0))
-        ttk.Label(actions, textvariable=self.stage_text, foreground='#1f5f99').grid(
-            row=3, column=0, columnspan=5, sticky=tk.W, pady=(10, 0)
+        self.sports_swap_note = ttk.Label(
+            actions,
+            text='体育抢选阶段：若已选体育不在目标教学班范围内，检测到目标空位后将自动退当前体育并立即抢选目标。',
+            foreground='#9b3b00',
         )
+        self.sports_swap_note.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(4, 0))
+        ttk.Label(actions, textvariable=self.stage_text, foreground='#1f5f99').grid(
+            row=4, column=0, columnspan=5, sticky=tk.W, pady=(10, 0)
+        )
+        self.sports_swap_note.grid_remove()
         actions.columnconfigure(3, weight=1)
 
         notebook = ttk.Notebook(outer)
+        self.main_notebook = notebook
         notebook.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         course_page = ttk.Frame(notebook, padding=6)
         notebook.add(course_page, text='可选课程')
@@ -139,7 +173,9 @@ class CourseSelectorApp(tk.Tk):
             )
 
         volunteer_page = ttk.Frame(notebook, padding=6)
+        self.volunteer_page = volunteer_page
         notebook.add(volunteer_page, text='体育志愿（仅预选阶段）')
+        notebook.hide(volunteer_page)
         ttk.Label(volunteer_page, textvariable=self.volunteer_text, anchor=tk.W).pack(fill=tk.X, pady=(0, 6))
         volunteer_actions = ttk.Frame(volunteer_page)
         volunteer_actions.pack(fill=tk.X, pady=(0, 6))
@@ -270,11 +306,71 @@ class CourseSelectorApp(tk.Tk):
         self.status_text.set('{}失败：{}'.format(description, error))
         messagebox.showerror('{}失败'.format(description), str(error), parent=self)
 
-    def login(self):
-        username = self.username_entry.get().strip()
-        password = self.password_entry.get()
+    def _clear_session(self, clear_stage=False):
+        """Stop the active session and clear data shown from that session."""
+        if self.selector is not None:
+            self.selector.stop_course_selection()
+        self.selector = None
+        self.course_references = {}
+        self.result_references = {}
+        self.volunteers = []
+        self.successful_class_ids.clear()
+        self.monitor_events = []
+        self.target_entry.delete(0, tk.END)
+        self.password_entry.delete(0, tk.END)
+        for table in self.course_tables.values():
+            table.delete(*table.get_children())
+        for table in self.result_tables.values():
+            table.delete(*table.get_children())
+        self.volunteer_table.delete(*self.volunteer_table.get_children())
+        if clear_stage:
+            self.stage_mode_var.set('')
+            self.preselection_mode_button.configure(state=tk.NORMAL)
+            self.grab_mode_button.configure(state=tk.NORMAL)
+        self._preview_stage_mode()
+
+    def relogin(self):
+        """Log in again immediately with this process's most recent credentials."""
+        if not self._last_login_username or not self._last_login_password:
+            messagebox.showwarning('没有可用会话', '请先手动完成一次登录。', parent=self)
+            return
+        stage_mode = self.stage_mode_var.get()
+        self._clear_session(clear_stage=False)
+        self.status_text.set('正在使用当前账号重新登录并建立新会话…')
+        self.login(self._last_login_username, self._last_login_password, stage_mode)
+
+    def switch_account(self):
+        """Return to the login form so a different account can be entered."""
+        self._clear_session(clear_stage=True)
+        self._last_login_username = None
+        self._last_login_password = None
+        self.password_entry.delete(0, tk.END)
+        self.stage_text.set('请选择选课阶段并输入新账号登录。')
+        self.volunteer_text.set('登录后可查看体育志愿状态。')
+        self.status_text.set('当前会话已清除；请输入新账号和密码。')
+        self.username_entry.focus_set()
+
+    def exit_app(self):
+        """Stop local selection loops before closing the GUI window."""
+        if self.selector is not None and not messagebox.askyesno(
+            '确认退出', '退出前将停止当前自动选课进程，是否继续？', parent=self
+        ):
+            return
+        if self.selector is not None:
+            self.selector.stop_course_selection()
+        self._last_login_username = None
+        self._last_login_password = None
+        self.destroy()
+
+    def login(self, username=None, password=None, stage_mode=None):
+        username = self.username_entry.get().strip() if username is None else username
+        password = self.password_entry.get() if password is None else password
         if not username or not password:
             messagebox.showwarning('信息不完整', '请输入 NetID 和密码。', parent=self)
+            return
+        stage_mode = self.stage_mode_var.get() if stage_mode is None else stage_mode
+        if not stage_mode:
+            messagebox.showwarning('请选择阶段', '请先选择当前是“预选阶段”还是“抢选阶段”。', parent=self)
             return
         try:
             settings = self._read_runtime_settings()
@@ -288,13 +384,18 @@ class CourseSelectorApp(tk.Tk):
             selector = course_selector(**settings)
             selector.pre_login()
             selector.in_login(username, password)
+            selector.set_selection_mode(stage_mode)
             return selector
 
         def done(selector):
             self.selector = selector
             selector.event_callback = self._on_selector_event
+            self._last_login_username = username
+            self._last_login_password = password
             self.password_entry.delete(0, tk.END)
             self.login_button.configure(state=tk.NORMAL)
+            self.preselection_mode_button.configure(state=tk.DISABLED)
+            self.grab_mode_button.configure(state=tk.DISABLED)
             self._update_stage_ui()
             self.status_text.set('登录成功，当前选课学期：{}，{}。'.format(
                 selector.semester_year, selector.selection_stage_name,
@@ -307,6 +408,9 @@ class CourseSelectorApp(tk.Tk):
 
         def failed(description, error):
             self.login_button.configure(state=tk.NORMAL)
+            if self.selector is None:
+                self.preselection_mode_button.configure(state=tk.NORMAL)
+                self.grab_mode_button.configure(state=tk.NORMAL)
             self._show_error(description, error)
 
         def worker():
@@ -323,15 +427,35 @@ class CourseSelectorApp(tk.Tk):
         if self.selector.sports_volunteer_enabled:
             self.refresh_volunteers()
 
+    def _preview_stage_mode(self):
+        """Show only the stage-specific UI selected before login."""
+        if self.stage_mode_var.get() == 'preselection':
+            self.main_notebook.add(self.volunteer_page, text='体育志愿（仅预选阶段）')
+            self.sports_swap_note.grid_remove()
+            self.stage_text.set('已选择预选阶段：登录后将显示体育四志愿功能并与教务阶段核对。')
+        elif self.stage_mode_var.get() == 'grab':
+            self.main_notebook.hide(self.volunteer_page)
+            self.sports_swap_note.grid()
+            self.stage_text.set('已选择抢选阶段：登录后将显示体育自动换课功能并与教务阶段核对。')
+        else:
+            self.main_notebook.hide(self.volunteer_page)
+            self.sports_swap_note.grid_remove()
+
     def _update_stage_ui(self):
-        if self.selector.sports_volunteer_enabled:
+        if self.selector.is_preselection_stage:
             self.stage_text.set(
                 '当前为{}：体育课使用预选志愿，最多 4 个；提交后请在“体育志愿”页调整 1–4 志愿。'.format(
                     self.selector.selection_stage_name
                 )
             )
-            self.volunteer_text.set('体育志愿可排序。请先选课，再在此确认并保存第一至第四志愿。')
-            state = tk.NORMAL
+            if self.selector.sports_volunteer_enabled:
+                self.volunteer_text.set('体育志愿可排序。请先选课，再在此确认并保存第一至第四志愿。')
+                state = tk.NORMAL
+            else:
+                self.volunteer_text.set('教务当前未开放体育志愿提交，志愿功能暂不可用。')
+                state = tk.DISABLED
+            self.main_notebook.add(self.volunteer_page, text='体育志愿（仅预选阶段）')
+            self.sports_swap_note.grid_remove()
         else:
             self.stage_text.set(
                 '当前为{}：抢选阶段，不使用体育志愿；“开始选课”会持续尝试普通选课。'.format(
@@ -340,6 +464,8 @@ class CourseSelectorApp(tk.Tk):
             )
             self.volunteer_text.set('当前不是体育预选阶段，志愿功能不可用。')
             state = tk.DISABLED
+            self.main_notebook.hide(self.volunteer_page)
+            self.sports_swap_note.grid()
         for button in (
             self.refresh_volunteers_button, self.volunteer_up_button,
             self.volunteer_down_button, self.save_volunteers_button,
@@ -402,6 +528,24 @@ class CourseSelectorApp(tk.Tk):
             )
         elif event_type == 'success':
             message = '选课成功（或已选）：{}'.format(label)
+        elif event_type == 'sports_target_satisfied':
+            message = '当前已选体育课已在目标范围内，结束体育抢选：{}'.format(label)
+        elif event_type == 'sports_waiting_for_vacancy':
+            message = '目标体育课暂无空位，{} 秒后重新扫描：{}'.format(event['delay'], label)
+        elif event_type == 'sports_swap_ready':
+            message = '检测到目标体育课空位：{}；正在退掉当前体育课：{}'.format(
+                label, event.get('current_course_label', ''),
+            )
+        elif event_type == 'sports_dropped':
+            message = '已退掉体育课：{}；正在抢选目标：{}'.format(
+                label, event.get('target_course_label', ''),
+            )
+        elif event_type == 'sports_grabbing_target':
+            message = '正在抢选有空位的目标体育课：{}'.format(label)
+        elif event_type == 'sports_swap_retry':
+            message = '体育换课退课请求未完成，{} 秒后重试：{}（{}）'.format(
+                event['delay'], label, event.get('message', '未知错误'),
+            )
         elif event_type == 'sports_submitting':
             message = '正在提交体育预选志愿：{}'.format(label)
         elif event_type == 'sports_submitted':
@@ -549,6 +693,10 @@ class CourseSelectorApp(tk.Tk):
         sports = summary.get('sports_volunteer_submitted', [])
         grabbing = summary.get('grab_started', [])
         messages = []
+        if summary.get('sports_target_satisfied'):
+            messages.append('当前已选体育课已在目标范围内，未发起退课或抢选')
+        if summary.get('sports_swapped_from'):
+            messages.append('已退原体育课并开始抢选目标体育课，请刷新“选课结果”确认最终状态')
         if sports:
             messages.append('已提交 {} 个体育志愿；请到“体育志愿”页确认并保存排序'.format(len(sports)))
             self.refresh_volunteers()

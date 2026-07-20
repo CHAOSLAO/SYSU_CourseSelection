@@ -48,14 +48,19 @@ def print_courses(selector, course_data):
 def main():
     selector = None
     try:
+        stage_choice = input('请选择当前选课阶段：1. 预选（体育四志愿）  2. 抢选（体育自动换课）：').strip()
+        stage_mode = {'1': 'preselection', '2': 'grab'}.get(stage_choice)
+        if stage_mode is None:
+            raise CourseSelectorError('请选择 1（预选）或 2（抢选）。')
         selector = course_selector()
         selector.pre_login()
         selector.in_login(name, pwd)
+        selector.set_selection_mode(stage_mode)
         print('当前选课阶段：{}'.format(selector.selection_stage_name))
         if selector.sports_volunteer_enabled:
             print('体育处于预选阶段：最多 4 个志愿，可在选课后设置第一至第四志愿。')
         else:
-            print('当前为抢选/非预选阶段：体育课程不使用志愿排序，将按普通选课方式持续尝试。')
+            print('当前为抢选/非预选阶段：体育课程不使用志愿排序。若已选体育不在输入的目标班范围内，程序会等待目标空位、退当前体育并抢选目标。')
         print('正在获取专业选修、公共必修和体育的可选课程清单…')
         course_data = selector.course_query_categories(list(selector.COURSE_CATEGORIES))
         print_courses(selector, course_data)
@@ -67,6 +72,12 @@ def main():
             summary = selector.course_select_wrapper(targets)
             if summary['sports_volunteer_submitted']:
                 print('已提交体育预选志愿，请确认并设置排序。')
+            if summary.get('sports_target_satisfied'):
+                print('当前已选体育课已在目标范围内，未执行退课或抢选。')
+            if summary.get('sports_swapped_from'):
+                print('已退原体育课 {}，正在抢选目标体育课；请查询选课结果确认。'.format(
+                    summary['sports_swapped_from']
+                ))
 
         if selector.sports_volunteer_enabled:
             volunteers = print_sports_volunteers(selector)

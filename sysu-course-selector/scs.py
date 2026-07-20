@@ -39,6 +39,10 @@ class course_selector:
         '2': ('公共必修', 1, 10),
         '3': ('体育', 3, 10),
     }
+    SELECTION_MODES = {
+        'preselection': '预选阶段',
+        'grab': '抢选阶段',
+    }
 
     user_agent = (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -95,6 +99,7 @@ class course_selector:
         self.public_key_id = None
         self.semester_year = None
         self.selection_stage = {}
+        self.selected_stage_mode = None
         self.event_callback = None
         self.selection_stop_event = threading.Event()
         self.selected_type = 1
@@ -279,9 +284,30 @@ class course_selector:
         )
 
     @property
+    def server_is_preselection_stage(self):
+        """Whether JWXT itself reports a pre-selection/screening stage."""
+        return str(self.selection_stage.get('electiveCourseStageCode')) in ('1', '2')
+
+    def set_selection_mode(self, mode):
+        """Confirm the stage selected by the user against JWXT's active stage."""
+        if mode not in self.SELECTION_MODES:
+            raise CourseSelectorError('请选择“预选阶段”或“抢选阶段”。')
+        expected_preselection = mode == 'preselection'
+        if expected_preselection != self.server_is_preselection_stage:
+            server_mode = '预选阶段' if self.server_is_preselection_stage else '抢选阶段'
+            raise CourseSelectorError(
+                '你选择的是{}，但教务系统当前为{}；请重新选择后登录。'.format(
+                    self.SELECTION_MODES[mode], server_mode
+                )
+            )
+        self.selected_stage_mode = mode
+
+    @property
     def is_preselection_stage(self):
         """Whether the current JWXT stage is a pre-selection/screening stage."""
-        return str(self.selection_stage.get('electiveCourseStageCode')) in ('1', '2')
+        if self.selected_stage_mode is not None:
+            return self.selected_stage_mode == 'preselection'
+        return self.server_is_preselection_stage
 
     @property
     def selection_stage_name(self):
@@ -302,7 +328,7 @@ class course_selector:
             for item in course_data
         ]
         self.class_number_by_id.update({
-            str(item.get('teachingClassId')): item.get('teachingClassNum', '')
+            str(item.get('teachingClassId')): self.__teaching_class_number(item)
             for item in course_data if item.get('teachingClassId')
         })
         return [{
@@ -310,7 +336,7 @@ class course_selector:
             'cname': item.get('courseName', ''),
             'lecturer': (item.get('teachingTimePlace') or '').split(';')[0],
             'sid': item.get('teachingClassId', ''),
-            'class_num': item.get('teachingClassNum', ''),
+            'class_num': self.__teaching_class_number(item),
             'class_id': item.get('teachingClassId', ''),
             'snum': '{}/{}'.format(item.get('courseSelectedNum', 0), item.get('baseReceiveNum', 0)),
             'filter_selected_num': item.get('filterSelectedNum'),
@@ -345,6 +371,11 @@ class course_selector:
             page_no += 1
         return course_data
 
+    @staticmethod
+    def __teaching_class_number(item):
+        """Return the user-visible class number from either JWXT field name."""
+        return item.get('teachingClassNum') or item.get('clazzNum') or ''
+
     def __resolve_unlisted_teaching_class(self, target):
         """Resolve a visible teaching-class number without relying on self.course_list.
 
@@ -357,7 +388,7 @@ class course_selector:
         for _, selected_type, selected_category in self.COURSE_CATEGORIES.values():
             for item in self.__query_category_rows(selected_type, selected_category):
                 if (
-                    str(item.get('teachingClassNum', '')) == target
+                    str(self.__teaching_class_number(item)) == target
                     or str(item.get('teachingClassId', '')) == target
                 ):
                     matches.append({
@@ -366,7 +397,7 @@ class course_selector:
                         '_selected_category': selected_category,
                     })
         self.class_number_by_id.update({
-            str(item.get('teachingClassId')): item.get('teachingClassNum', '')
+            str(item.get('teachingClassId')): self.__teaching_class_number(item)
             for item in matches if item.get('teachingClassId')
         })
         return matches
@@ -489,6 +520,122 @@ class course_selector:
             },
         )
         return result.get('message') or result.get('data') or '退课请求已提交。'
+
+    def __same_teaching_class(self, left, right):
+        """Compare normalized result rows and selectable-course rows."""
+        left_id = str(left.get('teachingClassId') or left.get('class_id') or '')
+        right_id = str(right.get('teachingClassId') or right.get('class_id') or '')
+        if left_id and right_id and left_id == right_id:
+            return True
+        left_number = str(self.__teaching_class_number(left) or left.get('class_num') or '')
+        right_number = str(self.__teaching_class_number(right) or right.get('class_num') or '')
+        return bool(left_number and right_number and left_number == right_number)
+
+    @staticmethod
+    def __has_vacancy(course):
+        """Whether the latest course-list snapshot reports an available seat."""
+        try:
+            return int(course.get('courseSelectedNum') or 0) < int(course.get('baseReceiveNum') or 0)
+        except (TypeError, ValueError):
+            return False
+
+    def __refresh_sports_targets(self, desired_targets):
+        """Refresh PE availability and return matching targets in user-entered order."""
+        rows = [
+            {
+                **item,
+                '_selected_type': 3,
+                '_selected_category': 10,
+            }
+            for item in self.__query_category_rows(3, 10)
+        ]
+        self.class_number_by_id.update({
+            str(item.get('teachingClassId')): self.__teaching_class_number(item)
+            for item in rows if item.get('teachingClassId')
+        })
+        refreshed = []
+        for target in desired_targets:
+            match = next((item for item in rows if self.__same_teaching_class(item, target)), None)
+            if match is not None:
+                refreshed.append(match)
+        return refreshed
+
+    def __run_sports_auto_swap(self, desired_targets, summary):
+        """Swap a selected PE class only after a desired target has a vacancy.
+
+        This is used during the normal grab-selection stage.  It intentionally
+        performs the requested order: detect a seat, drop the current PE class,
+        then immediately request the desired class.
+        """
+        while not self.selection_stop_event.is_set():
+            selected_sports = [
+                item for item in self.selection_result_query('success')
+                if str(item.get('selected_type')) == '3'
+            ]
+            selected_target = next(
+                (
+                    selected for selected in selected_sports
+                    if any(self.__same_teaching_class(selected, target) for target in desired_targets)
+                ),
+                None,
+            )
+            if selected_target is not None:
+                self.__emit_event(
+                    'sports_target_satisfied',
+                    course_label='{}（教学班号：{}）'.format(
+                        selected_target.get('cname', ''),
+                        selected_target.get('class_num') or selected_target.get('class_id', ''),
+                    ),
+                )
+                summary['sports_target_satisfied'] = True
+                return
+
+            refreshed_targets = self.__refresh_sports_targets(desired_targets)
+            vacancy_target = next((item for item in refreshed_targets if self.__has_vacancy(item)), None)
+            if vacancy_target is None:
+                self.__emit_event(
+                    'sports_waiting_for_vacancy',
+                    course_label='、'.join(self.__course_label(item) for item in desired_targets),
+                    delay=self.delay,
+                )
+                if self.selection_stop_event.wait(self.delay):
+                    break
+                continue
+
+            target_label = self.__course_label(vacancy_target)
+            if selected_sports:
+                current = selected_sports[0]
+                current_label = '{}（教学班号：{}）'.format(
+                    current.get('cname', ''), current.get('class_num') or current.get('class_id', ''),
+                )
+                self.__emit_event(
+                    'sports_swap_ready', course_label=target_label, current_course_label=current_label,
+                )
+                try:
+                    self.drop_course(current.get('course_id'), current.get('class_id'), current.get('selected_type'))
+                except CourseSelectorError as error:
+                    self.__emit_event(
+                        'sports_swap_retry', course_label=target_label, message=str(error), delay=self.delay,
+                    )
+                    if self.selection_stop_event.wait(self.delay):
+                        break
+                    continue
+                self.__emit_event(
+                    'sports_dropped', course_label=current_label, target_course_label=target_label,
+                )
+                summary['sports_swapped_from'] = current.get('class_num') or current.get('class_id', '')
+
+            self.__emit_event('sports_grabbing_target', course_label=target_label)
+            self.course_select(
+                vacancy_target['teachingClassId'],
+                vacancy_target.get('_selected_type', 3),
+                vacancy_target.get('_selected_category', 10),
+                target_label,
+            )
+            summary['grab_started'].append(self.__teaching_class_number(vacancy_target))
+            return
+
+        self.__emit_event('stopped')
 
     def sports_volunteer_query(self):
         """Return current PE volunteers in official preference order.
@@ -656,7 +803,7 @@ class course_selector:
             # the short, user-visible identifier; accept the internal ID too.
             matches = [
                 item for item in self.course_list
-                if str(item.get('teachingClassNum', '')) == target
+                if str(self.__teaching_class_number(item)) == target
                 or str(item.get('teachingClassId', '')) == target
             ]
             if not matches:
@@ -701,7 +848,16 @@ class course_selector:
             if self.sports_volunteer_enabled and str(item.get('_selected_type')) == '3'
         ]
         normal_courses = [item for item in matching_courses if item not in sports_volunteers]
-        summary = {'sports_volunteer_submitted': [], 'grab_started': []}
+        normal_sports = [
+            item for item in normal_courses if str(item.get('_selected_type')) == '3'
+        ]
+        normal_courses = [item for item in normal_courses if item not in normal_sports]
+        summary = {
+            'sports_volunteer_submitted': [],
+            'grab_started': [],
+            'sports_target_satisfied': False,
+            'sports_swapped_from': '',
+        }
 
         if sports_volunteers:
             existing_volunteers = self.sports_volunteer_query()
@@ -729,10 +885,18 @@ class course_selector:
                     item.get('_selected_type', self.selected_type),
                     item.get('_selected_category', self.selected_category),
                 )
-                summary['sports_volunteer_submitted'].append(item.get('teachingClassNum', ''))
+                summary['sports_volunteer_submitted'].append(self.__teaching_class_number(item))
                 self.__emit_event('sports_submitted', course_label=course_label)
 
         threads = []
+        if normal_sports:
+            sports_thread = threading.Thread(
+                target=self.__run_sports_auto_swap,
+                args=(normal_sports, summary),
+                name='sports-auto-swap',
+            )
+            sports_thread.start()
+            threads.append(sports_thread)
         for item in normal_courses:
             course_label = self.__course_label(item)
             self.__emit_event('started', course_label=course_label)
@@ -746,7 +910,7 @@ class course_selector:
                 )
                 thread.start()
                 threads.append(thread)
-            summary['grab_started'].append(item.get('teachingClassNum', ''))
+            summary['grab_started'].append(self.__teaching_class_number(item))
         for thread in threads:
             thread.join()
         if self.selection_stop_event.is_set():
@@ -755,5 +919,5 @@ class course_selector:
 
     @staticmethod
     def __course_label(item):
-        class_number = item.get('teachingClassNum') or item.get('teachingClassId', '')
+        class_number = course_selector.__teaching_class_number(item) or item.get('teachingClassId', '')
         return '{}（教学班号：{}）'.format(item.get('courseName', ''), class_number)
