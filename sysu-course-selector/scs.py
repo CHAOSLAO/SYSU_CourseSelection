@@ -20,6 +20,15 @@ class CourseSelectorError(RuntimeError):
     """Raised when SYSU's authentication or course-selection APIs reject a request."""
 
 
+class CASVerificationRequired(CourseSelectorError):
+    """CAS has accepted the password but requires a human second factor."""
+
+    def __init__(self, methods):
+        self.methods = tuple(methods)
+        names = '、'.join(course_selector.CAS_HUMAN_METHODS.get(method, method) for method in self.methods)
+        super().__init__('CAS 需要人工完成二次验证。可用方式：{}。'.format(names or '请在官方 CAS 页面完成验证'))
+
+
 class CourseSelectionFailure(CourseSelectorError):
     """A course-selection rejection with a user-facing category and retry rule."""
 
@@ -50,6 +59,9 @@ class course_selector:
     )
     cas_policy_url = 'https://cas.sysu.edu.cn/esc-sso/api/v3/auth/policy'
     cas_login_url = 'https://cas.sysu.edu.cn/esc-sso/api/v3/auth/doLogin'
+    cas_mfa_login_url = 'https://cas.sysu.edu.cn/esc-sso/app/upgradelogin'
+    cas_valid_methods_url = 'https://cas.sysu.edu.cn/esc-sso/api/v3/auth/queryAllValid'
+    cas_code_send_url = 'https://cas.sysu.edu.cn/esc-sso/api/v3/{}/send?username={}'
     cas_sso_url = 'https://cas.sysu.edu.cn/esc-sso/login'
     jwxt_sso_url = 'https://jwxt.sysu.edu.cn/jwxt/api/sso/cas/login?pattern=student-login'
     jwxt_url = 'https://jwxt.sysu.edu.cn/jwxt/{}'
@@ -63,6 +75,12 @@ class course_selector:
         'User-Agent': user_agent,
         'Accept': 'application/json, text/plain, */*',
     }
+    CAS_HUMAN_METHODS = {
+        'webWorkWechatMsgAuth': '企业微信验证码',
+        'webSmsAuth': '短信验证码',
+        'webWorkWechatAuth': '企业微信网页登录',
+    }
+    CAS_HUMAN_METHOD_ORDER = tuple(CAS_HUMAN_METHODS)
     info_paths = (
         'student-status/student-info/detail',
         'choose-course-front-server/classCourseInfo/selectCourseInfo',
@@ -97,6 +115,7 @@ class course_selector:
         self.class_number_by_id = {}
         self.public_key = None
         self.public_key_id = None
+        self.human_verification = None
         self.semester_year = None
         self.selection_stage = {}
         self.selected_stage_mode = None
@@ -218,6 +237,155 @@ class course_selector:
         except (KeyError, TypeError, ValueError) as error:
             raise CourseSelectorError('CAS returned an unsupported login policy.') from error
 
+    def __cas_login(self, payload):
+        return self.__cas_post_login(self.cas_login_url, payload, 'CAS login')
+
+    def __cas_mfa_login(self, payload):
+        """Submit a risk/MFA factor through CAS's dedicated upgrade-login API."""
+        return self.__cas_post_login(self.cas_mfa_login_url, payload, 'CAS MFA verification')
+
+    def __cas_post_login(self, url, payload, action):
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={**self.headers, 'Content-Type': 'application/json'},
+        )
+        response = self.__open_s(request)
+        if response is None or 'code' in response:
+            raise CourseSelectorError('{} request could not be submitted.'.format(action))
+        result = self.__json(response['read'], action)
+        if str(result.get('code')) != '0':
+            message = result.get('message') or result.get('msg') or 'invalid credentials or additional verification required'
+            raise CourseSelectorError('{} failed: {}'.format(action, message))
+        data = result.get('data') or {}
+        if isinstance(data, dict) and data.get('errorCode'):
+            raise CourseSelectorError('{} failed: {}'.format(action, data.get('errorCode')))
+        return result
+
+    @staticmethod
+    def __nested_value(source, *keys):
+        value = source
+        for key in keys:
+            if not isinstance(value, dict):
+                return None
+            value = value.get(key)
+        return value
+
+    def __prepare_human_verification(self, username):
+        """Read the CAS MFA policy retained in this authenticated temporary session."""
+        response = self.__open_s(urllib.request.Request(self.cas_valid_methods_url, headers=self.headers))
+        if response is None or 'code' in response:
+            raise CourseSelectorError('CAS requires additional verification, but its verification options could not be loaded.')
+        result = self.__json(response['read'], 'CAS verification options')
+        if str(result.get('code')) != '0':
+            raise CourseSelectorError('CAS verification options failed: {}'.format(
+                result.get('message') or result.get('msg') or 'unknown error'
+            ))
+        data = result.get('data') or {}
+        login = data.get('login') or {}
+        methods = [
+            method for method in self.CAS_HUMAN_METHOD_ORDER
+            if str(self.__nested_value(login, *self.__cas_method_path(method), 'status')) == '1'
+        ]
+        mfa_auths = self.__nested_value(data, 'config', 'mfaAuth', 'auths')
+        if isinstance(mfa_auths, list) and mfa_auths:
+            allowed = {
+                (item.get('authType') or item.get('type')) if isinstance(item, dict) else item
+                for item in mfa_auths
+            }
+            methods = [method for method in methods if method in allowed]
+        self.human_verification = {
+            'username': username,
+            'methods': tuple(methods),
+            'selected_method': None,
+            'code_length': self.__nested_value(login, 'webCodeAuth', 'webWorkWechatMsgAuth', 'codeLength'),
+            'mfa_type': self.__nested_value(data, 'config', 'mfaAuth', 'type'),
+            'app_id': self.__nested_value(data, 'config', 'mfaAuth', 'app', 'appId'),
+            'app_url': self.__nested_value(data, 'config', 'mfaAuth', 'app', 'appUrl'),
+        }
+        raise CASVerificationRequired(methods)
+
+    @staticmethod
+    def __cas_method_path(method):
+        if method == 'webWorkWechatMsgAuth':
+            return ('webCodeAuth', method)
+        if method == 'webSmsAuth':
+            return (method,)
+        if method == 'webWorkWechatAuth':
+            return ('webInternetAuth', method)
+        return (method,)
+
+    @property
+    def human_verification_methods(self):
+        """The current CAS MFA methods, without exposing any session token."""
+        return tuple((self.human_verification or {}).get('methods') or ())
+
+    def begin_human_verification(self, method='webWorkWechatMsgAuth'):
+        """Ask CAS to send a user-approved enterprise-WeChat verification code."""
+        challenge = self.human_verification
+        if not challenge:
+            raise CourseSelectorError('当前没有等待完成的 CAS 二次验证，请重新登录。')
+        if method not in challenge['methods']:
+            raise CourseSelectorError('CAS 当前未提供 {}。'.format(self.CAS_HUMAN_METHODS.get(method, method)))
+        if method != 'webWorkWechatMsgAuth':
+            raise CourseSelectorError('{} 需在官方 CAS 页面完成；本工具目前支持企业微信验证码。'.format(
+                self.CAS_HUMAN_METHODS.get(method, method)
+            ))
+        url = self.cas_code_send_url.format(method, urllib.parse.quote(challenge['username'], safe=''))
+        response = self.__open_s(urllib.request.Request(url, headers=self.headers))
+        if response is None or 'code' in response:
+            raise CourseSelectorError('无法向企业微信申请验证码。')
+        result = self.__json(response['read'], 'CAS enterprise-WeChat code request')
+        if str(result.get('code')) != '0':
+            raise CourseSelectorError('CAS 未发送企业微信验证码：{}'.format(
+                result.get('message') or result.get('msg') or 'unknown error'
+            ))
+        challenge['selected_method'] = method
+        return {
+            'method': method,
+            'label': self.CAS_HUMAN_METHODS[method],
+            'code_length': challenge.get('code_length'),
+        }
+
+    def complete_human_verification(self, code):
+        """Submit a code entered by the user, then resume the JWXT SSO flow."""
+        challenge = self.human_verification
+        if not challenge or challenge.get('selected_method') != 'webWorkWechatMsgAuth':
+            raise CourseSelectorError('请先申请企业微信验证码。')
+        code = str(code).strip()
+        if not code:
+            raise CourseSelectorError('请输入企业微信验证码。')
+        code_length = challenge.get('code_length')
+        if code_length and len(code) > int(code_length):
+            raise CourseSelectorError('企业微信验证码长度不能超过 {} 位。'.format(code_length))
+        if str(challenge.get('mfa_type')) != '2' or not challenge.get('app_id') or not challenge.get('app_url'):
+            raise CourseSelectorError('CAS 未返回可用于二次验证的应用信息，请重新登录。')
+        self.__cas_mfa_login({
+            'authType': 'webWorkWechatMsgAuth',
+            'dataField': {
+                'username': challenge['username'],
+                'msgCode': code,
+                'appId': challenge['app_id'],
+                'appUrl': challenge['app_url'],
+            },
+            'redirectUri': '',
+        })
+        self.__create_jwxt_session()
+        self.human_verification = None
+
+    def __create_jwxt_session(self):
+        """Create the JWXT ticket or preserve the CAS session for human MFA."""
+        service = urllib.parse.quote(self.jwxt_sso_url, safe='')
+        sso_request = urllib.request.Request(
+            '{}?service={}'.format(self.cas_sso_url, service), headers=self.headers
+        )
+        sso_response = self.__open_s(sso_request)
+        if sso_response is None or 'code' in sso_response:
+            raise CourseSelectorError('CAS login succeeded, but the JWXT SSO session could not be created.')
+        if 'mfaLogin' in sso_response.get('url', ''):
+            self.__prepare_human_verification((self.human_verification or {}).get('username', ''))
+        self.post_login()
+
     def in_login(self, username, password):
         """Log in through CAS v3, then create the JWXT student session."""
         if self.public_key is None or self.public_key_id is None:
@@ -236,30 +404,9 @@ class course_selector:
                 'publicKeyId': self.public_key_id,
             },
         }
-        request = urllib.request.Request(
-            self.cas_login_url,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={**self.headers, 'Content-Type': 'application/json'},
-        )
-        response = self.__open_s(request)
-        if response is None or 'code' in response:
-            raise CourseSelectorError('Unable to submit the CAS login request.')
-        result = self.__json(response['read'], 'CAS login')
-        if str(result.get('code')) != '0':
-            message = result.get('message') or result.get('msg') or 'invalid credentials or additional verification required'
-            raise CourseSelectorError('CAS login failed: {}'.format(message))
-
-        # CAS now issues the JWXT ticket through this student-login SSO endpoint.
-        service = urllib.parse.quote(self.jwxt_sso_url, safe='')
-        sso_request = urllib.request.Request(
-            '{}?service={}'.format(self.cas_sso_url, service), headers=self.headers
-        )
-        sso_response = self.__open_s(sso_request)
-        if sso_response is None or 'code' in sso_response:
-            raise CourseSelectorError('CAS login succeeded, but the JWXT SSO session could not be created.')
-        if 'mfaLogin' in sso_response.get('url', ''):
-            raise CourseSelectorError('Additional CAS verification is required; complete it in a browser, then retry.')
-        self.post_login()
+        self.__cas_login(payload)
+        self.human_verification = {'username': username, 'methods': (), 'selected_method': None, 'code_length': None}
+        self.__create_jwxt_session()
 
     def post_login(self):
         """Confirm the JWXT session and obtain the active course-selection term."""

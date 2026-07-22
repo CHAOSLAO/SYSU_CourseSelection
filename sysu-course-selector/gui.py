@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from scs import CourseSelectorError, course_selector
+from scs import CASVerificationRequired, CourseSelectorError, course_selector
 
 
 RESULT_TABS = (
@@ -44,6 +44,8 @@ class CourseSelectorApp(tk.Tk):
         self.stage_mode_var = tk.StringVar(value='')
         self._last_login_username = None
         self._last_login_password = None
+        self._verification_selector = None
+        self._verification_stage_mode = None
         self.category_vars = {
             key: tk.BooleanVar(value=True)
             for key in course_selector.COURSE_CATEGORIES
@@ -108,6 +110,27 @@ class CourseSelectorApp(tk.Tk):
         ttk.Label(login, text='登录后会与教务当前阶段核对，只显示对应功能。', foreground='#666666').grid(
             row=2, column=5, columnspan=4, sticky=tk.W, pady=(10, 0)
         )
+        self.verification_frame = ttk.LabelFrame(login, text='CAS 人工协助验证', padding=8)
+        self.verification_frame.grid(row=3, column=0, columnspan=9, sticky=tk.EW, pady=(10, 0))
+        self.verification_text = tk.StringVar(value='')
+        ttk.Label(self.verification_frame, textvariable=self.verification_text, foreground='#9b3b00').pack(
+            side=tk.LEFT, padx=(0, 12)
+        )
+        self.verification_code_entry = ttk.Entry(self.verification_frame, width=16, show='●')
+        self.verification_code_entry.pack(side=tk.LEFT)
+        self.verification_send_button = ttk.Button(
+            self.verification_frame, text='发送企微验证码', command=self.request_work_wechat_code,
+        )
+        self.verification_send_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.verification_continue_button = ttk.Button(
+            self.verification_frame, text='验证并继续登录', command=self.complete_work_wechat_verification,
+        )
+        self.verification_continue_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.verification_cancel_button = ttk.Button(
+            self.verification_frame, text='取消本次登录', command=self.cancel_human_verification,
+        )
+        self.verification_cancel_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.verification_frame.grid_remove()
         login.columnconfigure(9, weight=1)
 
         actions = ttk.LabelFrame(outer, text='课程查询与选课', padding=10)
@@ -289,9 +312,9 @@ class CourseSelectorApp(tk.Tk):
             try:
                 value = action()
             except (CourseSelectorError, OSError, ValueError) as error:
-                self.after(0, lambda: self._show_error(description, error))
+                self.after(0, lambda error=error: self._show_error(description, error))
             except Exception as error:  # keep a GUI callback failure from closing the app
-                self.after(0, lambda: self._show_error(description, error))
+                self.after(0, lambda error=error: self._show_error(description, error))
             else:
                 self.after(0, lambda: on_success(value))
         threading.Thread(target=worker, daemon=True).start()
@@ -323,11 +346,104 @@ class CourseSelectorApp(tk.Tk):
         for table in self.result_tables.values():
             table.delete(*table.get_children())
         self.volunteer_table.delete(*self.volunteer_table.get_children())
+        self._clear_human_verification()
         if clear_stage:
             self.stage_mode_var.set('')
             self.preselection_mode_button.configure(state=tk.NORMAL)
             self.grab_mode_button.configure(state=tk.NORMAL)
         self._preview_stage_mode()
+
+    def _clear_human_verification(self):
+        """Forget a pending MFA session without displaying its private state."""
+        self._verification_selector = None
+        self._verification_stage_mode = None
+        self.verification_code_entry.delete(0, tk.END)
+        self.verification_text.set('')
+        self.verification_frame.grid_remove()
+
+    def cancel_human_verification(self):
+        self._clear_human_verification()
+        self.login_button.configure(state=tk.NORMAL)
+        self.status_text.set('已取消本次 CAS 验证；可重新登录。')
+
+    def _show_human_verification(self, selector, stage_mode, error):
+        self._verification_selector = selector
+        self._verification_stage_mode = stage_mode
+        methods = set(error.methods)
+        self.verification_frame.grid()
+        if 'webWorkWechatMsgAuth' in methods:
+            self.verification_text.set('CAS 需要二次验证。推荐使用企业微信验证码：先发送，再输入你在企微中收到的验证码。')
+            self.verification_send_button.configure(state=tk.NORMAL)
+            self.verification_continue_button.configure(state=tk.NORMAL)
+        else:
+            self.verification_text.set('CAS 需要二次验证（{}）。请在官方 CAS 页面完成后重新登录。'.format(
+                '、'.join(course_selector.CAS_HUMAN_METHODS.get(method, method) for method in error.methods) or '无可自动处理方式'
+            ))
+            self.verification_send_button.configure(state=tk.DISABLED)
+            self.verification_continue_button.configure(state=tk.DISABLED)
+        self.login_button.configure(state=tk.NORMAL)
+        self.status_text.set('已保留本次 CAS 临时会话，等待你完成二次验证。')
+
+    def request_work_wechat_code(self):
+        selector = self._verification_selector
+        if selector is None:
+            messagebox.showwarning('没有验证会话', '请先登录并等待 CAS 要求二次验证。', parent=self)
+            return
+        self.verification_send_button.configure(state=tk.DISABLED)
+        self.status_text.set('正在向已绑定的企业微信申请验证码…')
+
+        def done(_result):
+            self.verification_send_button.configure(state=tk.NORMAL)
+            self.verification_code_entry.focus_set()
+            self.status_text.set('企业微信验证码已申请。请查看企微并输入验证码，然后点击“验证并继续登录”。')
+
+        def failed(description, error):
+            self.verification_send_button.configure(state=tk.NORMAL)
+            self._show_error(description, error)
+
+        def worker():
+            try:
+                result = selector.begin_human_verification()
+            except Exception as error:
+                self.after(0, lambda error=error: failed('申请企业微信验证码', error))
+            else:
+                self.after(0, lambda: done(result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def complete_work_wechat_verification(self):
+        selector = self._verification_selector
+        if selector is None:
+            messagebox.showwarning('没有验证会话', '请先登录并等待 CAS 要求二次验证。', parent=self)
+            return
+        code = self.verification_code_entry.get().strip()
+        if not code:
+            messagebox.showwarning('缺少验证码', '请输入企业微信收到的验证码。', parent=self)
+            return
+        self.verification_continue_button.configure(state=tk.DISABLED)
+        self.status_text.set('正在向 CAS 验证验证码并继续建立教务会话…')
+
+        def done(_result):
+            stage_mode = self._verification_stage_mode
+            self._clear_human_verification()
+            try:
+                selector.set_selection_mode(stage_mode)
+            except CourseSelectorError as error:
+                self._show_error('选课阶段核对', error)
+                return
+            self._login_succeeded(selector)
+
+        def failed(description, error):
+            self.verification_continue_button.configure(state=tk.NORMAL)
+            self._show_error(description, error)
+
+        def worker():
+            try:
+                selector.complete_human_verification(code)
+            except Exception as error:
+                self.after(0, lambda error=error: failed('CAS 二次验证', error))
+            else:
+                self.after(0, lambda: done(None))
+        threading.Thread(target=worker, daemon=True).start()
 
     def relogin(self):
         """Log in again immediately with this process's most recent credentials."""
@@ -382,29 +498,13 @@ class CourseSelectorApp(tk.Tk):
 
         def action():
             selector = course_selector(**settings)
-            selector.pre_login()
-            selector.in_login(username, password)
-            selector.set_selection_mode(stage_mode)
-            return selector
-
-        def done(selector):
-            self.selector = selector
-            selector.event_callback = self._on_selector_event
-            self._last_login_username = username
-            self._last_login_password = password
-            self.password_entry.delete(0, tk.END)
-            self.login_button.configure(state=tk.NORMAL)
-            self.preselection_mode_button.configure(state=tk.DISABLED)
-            self.grab_mode_button.configure(state=tk.DISABLED)
-            self._update_stage_ui()
-            self.status_text.set('登录成功，当前选课学期：{}，{}。'.format(
-                selector.semester_year, selector.selection_stage_name,
-            ))
-            self._run_in_background(
-                lambda: selector.course_query_categories(list(selector.COURSE_CATEGORIES)),
-                self._initial_courses_ready,
-                '登录后获取可选课程',
-            )
+            try:
+                selector.pre_login()
+                selector.in_login(username, password)
+                selector.set_selection_mode(stage_mode)
+            except CASVerificationRequired as error:
+                return selector, error
+            return selector, None
 
         def failed(description, error):
             self.login_button.configure(state=tk.NORMAL)
@@ -415,12 +515,35 @@ class CourseSelectorApp(tk.Tk):
 
         def worker():
             try:
-                selector = action()
+                selector, verification_error = action()
             except Exception as error:
-                self.after(0, lambda: failed('登录', error))
+                self.after(0, lambda error=error: failed('登录', error))
             else:
-                self.after(0, lambda: done(selector))
+                if verification_error is not None:
+                    self.after(0, lambda: self._show_human_verification(selector, stage_mode, verification_error))
+                else:
+                    self.after(0, lambda: self._login_succeeded(selector))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _login_succeeded(self, selector):
+        """Finish the common GUI setup after password-only or MFA login."""
+        self.selector = selector
+        selector.event_callback = self._on_selector_event
+        self._last_login_username = self.username_entry.get().strip() or self._last_login_username
+        self._last_login_password = self.password_entry.get() or self._last_login_password
+        self.password_entry.delete(0, tk.END)
+        self.login_button.configure(state=tk.NORMAL)
+        self.preselection_mode_button.configure(state=tk.DISABLED)
+        self.grab_mode_button.configure(state=tk.DISABLED)
+        self._update_stage_ui()
+        self.status_text.set('登录成功，当前选课学期：{}，{}。'.format(
+            selector.semester_year, selector.selection_stage_name,
+        ))
+        self._run_in_background(
+            lambda: selector.course_query_categories(list(selector.COURSE_CATEGORIES)),
+            self._initial_courses_ready,
+            '登录后获取可选课程',
+        )
 
     def _initial_courses_ready(self, courses):
         self._show_courses(courses)

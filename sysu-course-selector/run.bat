@@ -1,20 +1,14 @@
 @echo off
-setlocal
-chcp 65001 >nul
+setlocal EnableExtensions
 cd /d "%~dp0"
 
-where py >nul 2>nul
-if not errorlevel 1 (
-    py -3 main.py
-) else (
-    python main.py
-)
+py -3 main.py
+if not errorlevel 1 exit /b 0
 
-if errorlevel 1 (
-    echo.
-    echo 启动失败。请先安装 Python 3，并在本目录运行：
-    echo pip install -r requirements.txt
-    pause
-)
+python main.py
+if not errorlevel 1 exit /b 0
 
-endlocal
+echo.
+echo Failed to start. Install Python 3 and run:
+echo pip install -r requirements.txt
+pause

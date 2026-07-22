@@ -2,7 +2,7 @@
 
 from info import name, pwd
 
-from scs import CourseSelectorError, course_selector
+from scs import CASVerificationRequired, CourseSelectorError, course_selector
 
 
 def print_sports_volunteers(selector):
@@ -45,6 +45,21 @@ def print_courses(selector, course_data):
                 ))
 
 
+def complete_cas_human_verification(selector, error):
+    """Keep the terminal flow usable when CAS requests an MFA code."""
+    print('CAS 需要二次验证：{}'.format('、'.join(
+        selector.CAS_HUMAN_METHODS.get(method, method) for method in error.methods
+    ) or '请在官方 CAS 页面完成验证'))
+    if 'webWorkWechatMsgAuth' not in error.methods:
+        raise CourseSelectorError('当前 CAS 未提供企业微信验证码；请在官方 CAS 页面完成验证后重新运行。')
+    answer = input('向已绑定的企业微信发送验证码？[Y/n]：').strip().lower()
+    if answer not in ('', 'y', 'yes'):
+        raise CourseSelectorError('已取消本次登录。')
+    selector.begin_human_verification()
+    code = input('请输入企业微信收到的验证码：').strip()
+    selector.complete_human_verification(code)
+
+
 def main():
     selector = None
     try:
@@ -54,7 +69,10 @@ def main():
             raise CourseSelectorError('请选择 1（预选）或 2（抢选）。')
         selector = course_selector()
         selector.pre_login()
-        selector.in_login(name, pwd)
+        try:
+            selector.in_login(name, pwd)
+        except CASVerificationRequired as error:
+            complete_cas_human_verification(selector, error)
         selector.set_selection_mode(stage_mode)
         print('当前选课阶段：{}'.format(selector.selection_stage_name))
         if selector.sports_volunteer_enabled:
