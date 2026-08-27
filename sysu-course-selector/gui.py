@@ -28,6 +28,7 @@ class CourseSelectorApp(tk.Tk):
         self.selector = None
         self.course_references = {}
         self.status_text = tk.StringVar(value='请输入 NetID 和密码后登录。')
+        self.login_diagnostic_text = tk.StringVar(value='登录诊断：尚未开始。')
         self.stage_text = tk.StringVar(value='选课阶段将在登录后显示。')
         self.volunteer_text = tk.StringVar(value='登录后可查看体育志愿状态。')
         self.volunteers = []
@@ -38,9 +39,9 @@ class CourseSelectorApp(tk.Tk):
         self.successful_class_ids = set()
         self.concurrent_var = tk.StringVar(value='1')
         self.delay_var = tk.StringVar(value='5')
-        self.timeout_var = tk.StringVar(value='5')
-        self.proxy_enabled_var = tk.BooleanVar(value=False)
-        self.proxy_port_var = tk.StringVar(value='1080')
+        self.timeout_var = tk.StringVar(value='15')
+        self.proxy_mode_var = tk.StringVar(value='系统代理')
+        self.proxy_port_var = tk.StringVar(value='7897')
         self.stage_mode_var = tk.StringVar(value='')
         self._last_login_username = None
         self._last_login_password = None
@@ -87,13 +88,17 @@ class CourseSelectorApp(tk.Tk):
         ttk.Spinbox(login, from_=2, to=60, width=6, textvariable=self.timeout_var).grid(
             row=1, column=5, sticky=tk.W, pady=(10, 0)
         )
-        ttk.Checkbutton(login, text='使用本机 SOCKS5 代理', variable=self.proxy_enabled_var).grid(
-            row=1, column=6, sticky=tk.W, pady=(10, 0), padx=(16, 4)
-        )
+        ttk.Combobox(
+            login,
+            width=12,
+            state='readonly',
+            textvariable=self.proxy_mode_var,
+            values=('系统代理', 'HTTP 代理', 'SOCKS5 代理', '不使用代理'),
+        ).grid(row=1, column=6, sticky=tk.W, pady=(10, 0), padx=(16, 4))
         ttk.Entry(login, width=7, textvariable=self.proxy_port_var).grid(
             row=1, column=7, sticky=tk.W, pady=(10, 0)
         )
-        ttk.Label(login, text='端口').grid(row=1, column=8, sticky=tk.W, pady=(10, 0), padx=(4, 0))
+        ttk.Label(login, text='端口（手动代理）').grid(row=1, column=8, sticky=tk.W, pady=(10, 0), padx=(4, 0))
         ttk.Label(login, text='当前选课阶段（登录前必选）').grid(
             row=2, column=0, sticky=tk.W, pady=(10, 0)
         )
@@ -131,6 +136,9 @@ class CourseSelectorApp(tk.Tk):
         )
         self.verification_cancel_button.pack(side=tk.LEFT, padx=(8, 0))
         self.verification_frame.grid_remove()
+        ttk.Label(login, textvariable=self.login_diagnostic_text, foreground='#666666', wraplength=1000).grid(
+            row=4, column=0, columnspan=9, sticky=tk.W, pady=(8, 0)
+        )
         login.columnconfigure(9, weight=1)
 
         actions = ttk.LabelFrame(outer, text='课程查询与选课', padding=10)
@@ -329,6 +337,13 @@ class CourseSelectorApp(tk.Tk):
         self.status_text.set('{}失败：{}'.format(description, error))
         messagebox.showerror('{}失败'.format(description), str(error), parent=self)
 
+    def _show_login_diagnostics(self, selector):
+        """Display safe CAS/JWXT checkpoints without exposing account or cookie data."""
+        markers = tuple(getattr(selector, 'login_diagnostics', ()) or ())
+        self.login_diagnostic_text.set(
+            '登录诊断：{}'.format(' → '.join(markers) if markers else '未取得诊断标志。')
+        )
+
     def _clear_session(self, clear_stage=False):
         """Stop the active session and clear data shown from that session."""
         if self.selector is not None:
@@ -369,6 +384,7 @@ class CourseSelectorApp(tk.Tk):
     def _show_human_verification(self, selector, stage_mode, error):
         self._verification_selector = selector
         self._verification_stage_mode = stage_mode
+        self._show_login_diagnostics(selector)
         methods = set(error.methods)
         self.verification_frame.grid()
         if 'webWorkWechatMsgAuth' in methods:
@@ -498,6 +514,7 @@ class CourseSelectorApp(tk.Tk):
 
         def action():
             selector = course_selector(**settings)
+            selector_holder['selector'] = selector
             try:
                 selector.pre_login()
                 selector.in_login(username, password)
@@ -506,18 +523,23 @@ class CourseSelectorApp(tk.Tk):
                 return selector, error
             return selector, None
 
-        def failed(description, error):
+        def failed(description, error, selector=None):
             self.login_button.configure(state=tk.NORMAL)
             if self.selector is None:
                 self.preselection_mode_button.configure(state=tk.NORMAL)
                 self.grab_mode_button.configure(state=tk.NORMAL)
+            if selector is not None:
+                self._show_login_diagnostics(selector)
             self._show_error(description, error)
+
+        selector_holder = {}
 
         def worker():
             try:
                 selector, verification_error = action()
             except Exception as error:
-                self.after(0, lambda error=error: failed('登录', error))
+                selector = selector_holder.get('selector')
+                self.after(0, lambda error=error, selector=selector: failed('登录', error, selector))
             else:
                 if verification_error is not None:
                     self.after(0, lambda: self._show_human_verification(selector, stage_mode, verification_error))
@@ -535,6 +557,7 @@ class CourseSelectorApp(tk.Tk):
         self.login_button.configure(state=tk.NORMAL)
         self.preselection_mode_button.configure(state=tk.DISABLED)
         self.grab_mode_button.configure(state=tk.DISABLED)
+        self._show_login_diagnostics(selector)
         self._update_stage_ui()
         self.status_text.set('登录成功，当前选课学期：{}，{}。'.format(
             selector.semester_year, selector.selection_stage_name,
@@ -700,15 +723,22 @@ class CourseSelectorApp(tk.Tk):
 
     def _read_runtime_settings(self):
         """Read the advanced controls without persisting any of their values."""
+        proxy_modes = {
+            '系统代理': 'system',
+            'HTTP 代理': 'http',
+            'SOCKS5 代理': 'socks5',
+            '不使用代理': 'none',
+        }
         try:
             settings = {
                 'concurrent_request': int(self.concurrent_var.get()),
                 'delay': int(self.delay_var.get()),
                 'timeout': int(self.timeout_var.get()),
-                'use_socks5_proxy': self.proxy_enabled_var.get(),
-                'socks5_proxy_port': int(self.proxy_port_var.get()),
+                'proxy_mode': proxy_modes[self.proxy_mode_var.get()],
+                'proxy_host': '127.0.0.1',
+                'proxy_port': int(self.proxy_port_var.get()),
             }
-        except ValueError as error:
+        except (KeyError, ValueError) as error:
             raise ValueError('并发数、重试间隔、网络超时和代理端口必须是整数。') from error
         if not 1 <= settings['concurrent_request'] <= 10:
             raise ValueError('并发请求数应在 1 到 10 之间。')
@@ -716,8 +746,8 @@ class CourseSelectorApp(tk.Tk):
             raise ValueError('重试间隔应在 1 到 60 秒之间。')
         if not 2 <= settings['timeout'] <= 60:
             raise ValueError('网络超时应在 2 到 60 秒之间。')
-        if settings['use_socks5_proxy'] and not 1 <= settings['socks5_proxy_port'] <= 65535:
-            raise ValueError('SOCKS5 代理端口应在 1 到 65535 之间。')
+        if settings['proxy_mode'] in ('http', 'socks5') and not 1 <= settings['proxy_port'] <= 65535:
+            raise ValueError('代理端口应在 1 到 65535 之间。')
         return settings
 
     def query_courses(self):

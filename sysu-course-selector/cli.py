@@ -74,6 +74,7 @@ def main():
         except CASVerificationRequired as error:
             complete_cas_human_verification(selector, error)
         selector.set_selection_mode(stage_mode)
+        print('登录诊断：{}'.format(' → '.join(selector.login_diagnostics)))
         print('当前选课阶段：{}'.format(selector.selection_stage_name))
         if selector.sports_volunteer_enabled:
             print('体育处于预选阶段：最多 4 个志愿，可在选课后设置第一至第四志愿。')
@@ -105,6 +106,8 @@ def main():
                     saved = selector.save_sports_volunteer_order(order.split(','))
                     print('已保存 {} 个体育志愿的排序。'.format(len(saved)))
     except CourseSelectorError as error:
+        if selector is not None and selector.login_diagnostics:
+            print('登录诊断：{}'.format(' → '.join(selector.login_diagnostics)))
         print('无法继续：{}'.format(error))
     except KeyboardInterrupt:
         if selector is not None:

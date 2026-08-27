@@ -9,15 +9,44 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import requests
 import socks
+from sockshandler import SocksiPyHandler
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from setting import CONCURRENT_REQUEST, DELAY, SOCKS5_PROXY_PORT, TIMEOUT, USE_SOCKS5_PROXY
+from setting import CONCURRENT_REQUEST, DELAY, PROXY_HOST, PROXY_MODE, PROXY_PORT, TIMEOUT
 
 
 class CourseSelectorError(RuntimeError):
     """Raised when SYSU's authentication or course-selection APIs reject a request."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Expose CAS's Location header so the JWXT ticket hop can use a fresh connection."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+class JWXTNoActiveCourseSelectionTerm(CourseSelectorError):
+    """CAS/JWXT authentication succeeded, but JWXT exposed no active term."""
+
+    marker = 'JWXT-NO-ACTIVE-TERM'
+
+    def __init__(self, selection_stage, response_keys):
+        self.selection_stage = dict(selection_stage or {})
+        self.response_keys = tuple(response_keys or ())
+        stage_name = self.selection_stage.get('electiveCourseStageName') or '未提供'
+        course_select_type = self.selection_stage.get('courseSelectType', '未提供')
+        super().__init__(
+            '[{}] CAS 与 JWXT 会话已建立，但 JWXT 未返回活动选课学期（semesterYear）。'
+            '这通常表示当前没有面向该账号的活动选课批次，不是 CAS 登录或二次验证失败；'
+            '也可能是 JWXT 接口字段调整。阶段：{}；courseSelectType：{}；返回字段：{}。'.format(
+                self.marker, stage_name, course_select_type,
+                '、'.join(self.response_keys) or '无',
+            )
+        )
 
 
 class CASVerificationRequired(CourseSelectorError):
@@ -92,8 +121,11 @@ class course_selector:
         concurrent_request=CONCURRENT_REQUEST,
         delay=DELAY,
         timeout=TIMEOUT,
-        use_socks5_proxy=USE_SOCKS5_PROXY,
-        socks5_proxy_port=SOCKS5_PROXY_PORT,
+        proxy_mode=PROXY_MODE,
+        proxy_host=PROXY_HOST,
+        proxy_port=PROXY_PORT,
+        use_socks5_proxy=None,
+        socks5_proxy_port=None,
     ):
         if not 1 <= int(concurrent_request) <= 10:
             raise CourseSelectorError('Concurrent request count must be between 1 and 10.')
@@ -101,8 +133,15 @@ class course_selector:
             raise CourseSelectorError('Retry interval must be between 1 and 60 seconds.')
         if not 2 <= int(timeout) <= 60:
             raise CourseSelectorError('Network timeout must be between 2 and 60 seconds.')
-        if use_socks5_proxy and not 1 <= int(socks5_proxy_port) <= 65535:
-            raise CourseSelectorError('SOCKS5 proxy port must be between 1 and 65535.')
+        if use_socks5_proxy is not None:
+            proxy_mode = 'socks5' if use_socks5_proxy else 'none'
+            if socks5_proxy_port is not None:
+                proxy_port = socks5_proxy_port
+        proxy_mode = str(proxy_mode).lower().strip()
+        if proxy_mode not in ('system', 'http', 'socks5', 'none'):
+            raise CourseSelectorError('Proxy mode must be system, http, socks5, or none.')
+        if proxy_mode in ('http', 'socks5') and not 1 <= int(proxy_port) <= 65535:
+            raise CourseSelectorError('Proxy port must be between 1 and 65535.')
         logging.basicConfig(
             filename='log3.log',
             level=logging.DEBUG,
@@ -110,12 +149,47 @@ class course_selector:
             datefmt='%Y-%m-%d %H:%M:%S',
         )
         cookie_jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        self.cookie_jar = cookie_jar
+        proxy_handlers = []
+        no_redirect_proxy_handlers = []
+        requests_proxies = {}
+        if proxy_mode == 'system':
+            system_proxies = urllib.request.getproxies()
+            proxy_handlers.append(urllib.request.ProxyHandler(system_proxies))
+            no_redirect_proxy_handlers.append(urllib.request.ProxyHandler(system_proxies))
+            requests_proxies = {
+                key: value for key, value in system_proxies.items() if key in ('http', 'https')
+            }
+        elif proxy_mode == 'http':
+            proxy_url = 'http://{}:{}'.format(proxy_host, int(proxy_port))
+            proxy_handlers.append(urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url}))
+            no_redirect_proxy_handlers.append(urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url}))
+            requests_proxies = {'http': proxy_url, 'https': proxy_url}
+        elif proxy_mode == 'socks5':
+            proxy_handlers.append(SocksiPyHandler(socks.SOCKS5, proxy_host, int(proxy_port)))
+            no_redirect_proxy_handlers.append(SocksiPyHandler(socks.SOCKS5, proxy_host, int(proxy_port)))
+            proxy_url = 'socks5h://{}:{}'.format(proxy_host, int(proxy_port))
+            requests_proxies = {'http': proxy_url, 'https': proxy_url}
+        else:
+            proxy_handlers.append(urllib.request.ProxyHandler({}))
+            no_redirect_proxy_handlers.append(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(
+            *proxy_handlers, urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+        self.no_redirect_opener = urllib.request.build_opener(
+            *no_redirect_proxy_handlers, urllib.request.HTTPCookieProcessor(cookie_jar), _NoRedirectHandler()
+        )
+        self.requests_session = requests.Session()
+        self.requests_session.trust_env = False
+        self.requests_session.headers.update(self.headers)
+        self.requests_proxies = requests_proxies
+        self.jwxt_requests_proxies = requests_proxies
         self.course_list = []
         self.class_number_by_id = {}
         self.public_key = None
         self.public_key_id = None
         self.human_verification = None
+        self.login_markers = []
         self.semester_year = None
         self.selection_stage = {}
         self.selected_stage_mode = None
@@ -126,13 +200,35 @@ class course_selector:
         self.concurrent_request = int(concurrent_request)
         self.delay = int(delay)
         self.timeout = int(timeout)
-        self.use_socks5_proxy = bool(use_socks5_proxy)
-        self.socks5_proxy_port = int(socks5_proxy_port)
-        if self.use_socks5_proxy:
-            socks.set_default_proxy(socks.SOCKS5, 'localhost', self.socks5_proxy_port)
-            socket.socket = socks.socksocket
+        self.proxy_mode = proxy_mode
+        self.proxy_host = str(proxy_host)
+        self.proxy_port = int(proxy_port)
+        self.proxy_description = self.__proxy_description()
+        self.last_network_error = None
+        self.__mark_login('NETWORK-PROXY', self.proxy_description)
+
+    def __proxy_description(self):
+        if self.proxy_mode == 'system':
+            proxies = urllib.request.getproxies()
+            https_proxy = proxies.get('https') or proxies.get('http')
+            return '使用 Windows 系统代理{}'.format('：{}'.format(https_proxy) if https_proxy else '（未检测到地址）')
+        if self.proxy_mode == 'none':
+            return '不使用代理（直连）'
+        return '使用 {} 代理：{}:{}'.format(self.proxy_mode.upper(), self.proxy_host, self.proxy_port)
+
+    def __mark_login(self, code, message):
+        """Record non-sensitive, user-visible milestones for login diagnosis."""
+        marker = '[{}] {}'.format(code, message)
+        self.login_markers.append(marker)
+        logging.info('login marker: %s', marker)
+
+    @property
+    def login_diagnostics(self):
+        """Safe login milestones; deliberately excludes credentials and cookies."""
+        return tuple(self.login_markers)
 
     def __open_s(self, request):
+        self.last_network_error = None
         try:
             response = self.opener.open(request, timeout=self.timeout)
             content = response.read().decode('utf-8', errors='replace')
@@ -145,6 +241,8 @@ class course_selector:
             return {'read': body, 'code': error.code, 'reason': error.reason}
         except (socket.timeout, urllib.error.URLError) as error:
             logging.debug('network error: %s', error)
+            reason = getattr(error, 'reason', error)
+            self.last_network_error = '{}: {}'.format(type(reason).__name__, reason)
             return None
 
     def __api_headers(self):
@@ -178,14 +276,45 @@ class course_selector:
             raise CourseSelectorError('{} returned an unexpected response.'.format(action)) from error
 
     def __request_json(self, path, action, payload=None, accepted_codes=(200,), error_factory=None):
-        data = None if payload is None else json.dumps(payload).encode('utf-8')
-        request = urllib.request.Request(
-            self.jwxt_url.format(path), data=data, headers=self.__api_headers()
-        )
-        response = self.__open_s(request)
-        if response is None or 'code' in response:
-            raise CourseSelectorError('{} failed: unable to reach JWXT.'.format(action))
-        result = self.__json(response['read'], action)
+        method = 'GET' if payload is None else 'POST'
+        proxy_attempts = [self.jwxt_requests_proxies]
+        if method == 'GET':
+            # Read-only API calls can be retried safely.  Clash/TUN setups may
+            # transiently reset either the explicit proxy or the TUN path.
+            alternate = {} if self.jwxt_requests_proxies else self.requests_proxies
+            proxy_attempts = [self.jwxt_requests_proxies, self.jwxt_requests_proxies]
+            if alternate != self.jwxt_requests_proxies:
+                proxy_attempts.extend((alternate, self.jwxt_requests_proxies))
+        response = None
+        last_error = None
+        for attempt, attempt_proxies in enumerate(proxy_attempts, start=1):
+            try:
+                response = self.requests_session.request(
+                    method,
+                    self.jwxt_url.format(path),
+                    json=payload,
+                    headers=self.__api_headers(),
+                    proxies=attempt_proxies,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+            except requests.RequestException as error:
+                last_error = error
+                response = None
+                if attempt < len(proxy_attempts):
+                    time.sleep(1)
+                    continue
+                break
+            self.jwxt_requests_proxies = attempt_proxies
+            break
+        if response is None:
+            raise CourseSelectorError('{} failed: unable to reach JWXT（{}；{}）.'.format(
+                action, self.proxy_description, last_error
+            )) from last_error
+        try:
+            result = response.json()
+        except requests.exceptions.JSONDecodeError as error:
+            raise CourseSelectorError('{} returned an unexpected response.'.format(action)) from error
         if result.get('code') not in accepted_codes:
             if error_factory is not None:
                 raise error_factory(result)
@@ -226,23 +355,35 @@ class course_selector:
         """Fetch the public key required by the current CAS v3 login API."""
         request = urllib.request.Request(self.cas_policy_url, headers=self.headers)
         response = self.__open_s(request)
-        if response is None or 'code' in response:
-            raise CourseSelectorError('Unable to reach the CAS login policy endpoint.')
+        if response is None:
+            self.__mark_login('CAS-POLICY-NETWORK-FAILED', self.last_network_error or '未知网络错误')
+            raise CourseSelectorError('无法连接 CAS 登录策略接口（{}；{}）。'.format(
+                self.proxy_description, self.last_network_error or '未知网络错误'
+            ))
+        if 'code' in response:
+            raise CourseSelectorError('CAS 登录策略接口返回 HTTP {} {}。'.format(
+                response.get('code'), response.get('reason') or ''
+            ))
         policy = self.__json(response['read'], 'CAS login policy')
         try:
             params = policy['data']['param']
             public_key = params['publicKey']
             self.public_key_id = params['publicKeyId']
             self.public_key = serialization.load_der_public_key(base64.b64decode(public_key))
+            self.__mark_login('CAS-POLICY-OK', '已取得 CAS 登录公钥。')
         except (KeyError, TypeError, ValueError) as error:
             raise CourseSelectorError('CAS returned an unsupported login policy.') from error
 
     def __cas_login(self, payload):
-        return self.__cas_post_login(self.cas_login_url, payload, 'CAS login')
+        result = self.__cas_post_login(self.cas_login_url, payload, 'CAS login')
+        self.__mark_login('CAS-PASSWORD-OK', 'CAS 已接受账号密码。')
+        return result
 
     def __cas_mfa_login(self, payload):
         """Submit a risk/MFA factor through CAS's dedicated upgrade-login API."""
-        return self.__cas_post_login(self.cas_mfa_login_url, payload, 'CAS MFA verification')
+        result = self.__cas_post_login(self.cas_mfa_login_url, payload, 'CAS MFA verification')
+        self.__mark_login('CAS-MFA-OK', 'CAS 二次验证已通过。')
+        return result
 
     def __cas_post_login(self, url, payload, action):
         request = urllib.request.Request(
@@ -251,8 +392,14 @@ class course_selector:
             headers={**self.headers, 'Content-Type': 'application/json'},
         )
         response = self.__open_s(request)
-        if response is None or 'code' in response:
-            raise CourseSelectorError('{} request could not be submitted.'.format(action))
+        if response is None:
+            raise CourseSelectorError('{} request could not be submitted（{}；{}）.'.format(
+                action, self.proxy_description, self.last_network_error or '未知网络错误'
+            ))
+        if 'code' in response:
+            raise CourseSelectorError('{} returned HTTP {} {}.'.format(
+                action, response.get('code'), response.get('reason') or ''
+            ))
         result = self.__json(response['read'], action)
         if str(result.get('code')) != '0':
             message = result.get('message') or result.get('msg') or 'invalid credentials or additional verification required'
@@ -303,6 +450,11 @@ class course_selector:
             'app_id': self.__nested_value(data, 'config', 'mfaAuth', 'app', 'appId'),
             'app_url': self.__nested_value(data, 'config', 'mfaAuth', 'app', 'appUrl'),
         }
+        self.__mark_login(
+            'CAS-MFA-REQUIRED', 'CAS 要求二次验证：{}。'.format(
+                '、'.join(self.CAS_HUMAN_METHODS.get(method, method) for method in methods) or '请使用官方页面'
+            )
+        )
         raise CASVerificationRequired(methods)
 
     @staticmethod
@@ -373,17 +525,106 @@ class course_selector:
         self.__create_jwxt_session()
         self.human_verification = None
 
-    def __create_jwxt_session(self):
-        """Create the JWXT ticket or preserve the CAS session for human MFA."""
+    def __get_jwxt_ticket_url(self):
+        """Ask CAS for a fresh, one-time JWXT service ticket."""
         service = urllib.parse.quote(self.jwxt_sso_url, safe='')
         sso_request = urllib.request.Request(
             '{}?service={}'.format(self.cas_sso_url, service), headers=self.headers
         )
-        sso_response = self.__open_s(sso_request)
-        if sso_response is None or 'code' in sso_response:
-            raise CourseSelectorError('CAS login succeeded, but the JWXT SSO session could not be created.')
-        if 'mfaLogin' in sso_response.get('url', ''):
+        location = None
+        try:
+            response = self.no_redirect_opener.open(sso_request, timeout=self.timeout)
+            response.read()
+            response_url = response.geturl()
+        except urllib.error.HTTPError as error:
+            if error.code not in (301, 302, 303, 307, 308):
+                self.__mark_login('JWXT-SSO-HTTP-FAILED', 'CAS 跳转返回 HTTP {} {}'.format(error.code, error.reason))
+                raise CourseSelectorError(
+                    '[JWXT-SSO-HTTP-FAILED] CAS 登录成功，但 SSO 跳转返回 HTTP {} {}。'.format(
+                        error.code, error.reason
+                    )
+                ) from error
+            location = error.headers.get('Location')
+            response_url = sso_request.full_url
+        except (socket.timeout, urllib.error.URLError) as error:
+            reason = getattr(error, 'reason', error)
+            detail = '{}: {}'.format(type(reason).__name__, reason)
+            self.__mark_login('JWXT-SSO-NETWORK-FAILED', '{}；{}'.format(self.proxy_description, detail))
+            raise CourseSelectorError(
+                '[JWXT-SSO-NETWORK-FAILED] CAS 登录成功，但无法取得 JWXT SSO 跳转（{}；{}）。'.format(
+                    self.proxy_description, detail
+                )
+            ) from error
+
+        target_url = urllib.parse.urljoin(response_url, location) if location else response_url
+        if 'mfaLogin' in target_url:
             self.__prepare_human_verification((self.human_verification or {}).get('username', ''))
+        target = urllib.parse.urlsplit(target_url)
+        if target.hostname != urllib.parse.urlsplit(self.jwxt_sso_url).hostname:
+            raise CourseSelectorError(
+                '[JWXT-SSO-REDIRECT-INVALID] CAS 未返回预期的 JWXT 跳转地址（目标：{}）。'.format(
+                    target.hostname or '无'
+                )
+            )
+        return target_url
+
+    def __create_jwxt_session(self):
+        """Create the JWXT session, requesting a fresh ticket after a reset."""
+
+        jwxt_response = None
+        last_error = None
+        if self.proxy_mode == 'system' and self.requests_proxies:
+            # Clash-style Fake-IP/TUN setups can reset the one-time JWXT ticket
+            # when it is sent through the explicit HTTP proxy, while the TUN
+            # path succeeds.  Try that path first so the ticket is not consumed.
+            proxy_attempts = [{}, self.requests_proxies, {}, self.requests_proxies, {}]
+        elif self.proxy_mode == 'http':
+            proxy_attempts = [self.requests_proxies, self.requests_proxies, {}, self.requests_proxies, {}]
+        else:
+            proxy_attempts = [self.requests_proxies] * 3
+        for attempt, attempt_proxies in enumerate(proxy_attempts, start=1):
+            if attempt == 1 and not attempt_proxies and self.requests_proxies:
+                self.__mark_login('JWXT-TICKET-TUN-FIRST', '系统代理环境下优先由本机 TUN/直连处理 ticket。')
+            if attempt > 1 and not attempt_proxies and self.requests_proxies:
+                self.__mark_login('JWXT-TICKET-DIRECT-FALLBACK', '显式代理失败，改由本机 TUN/直连处理。')
+            # CAS service tickets are single-use.  A connection reset may have
+            # consumed the previous ticket, so every retry must request a new one.
+            target_url = self.__get_jwxt_ticket_url()
+            session = requests.Session()
+            session.trust_env = False
+            session.headers.update({**self.headers, 'Connection': 'close'})
+            for cookie in self.cookie_jar:
+                session.cookies.set_cookie(cookie)
+            try:
+                jwxt_response = session.get(
+                    target_url,
+                    proxies=attempt_proxies,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                )
+                jwxt_response.raise_for_status()
+            except requests.RequestException as error:
+                last_error = error
+                jwxt_response = None
+                session.close()
+                if attempt < len(proxy_attempts):
+                    self.__mark_login('JWXT-TICKET-RETRY', 'ticket 请求失败，准备第 {} 次尝试。'.format(attempt + 1))
+                    time.sleep(1)
+                continue
+            self.requests_session.close()
+            self.requests_session = session
+            self.jwxt_requests_proxies = attempt_proxies
+            break
+        if jwxt_response is None:
+            self.__mark_login('JWXT-SSO-NETWORK-FAILED', '{}；{}'.format(self.proxy_description, last_error))
+            raise CourseSelectorError(
+                '[JWXT-SSO-NETWORK-FAILED] CAS 登录成功，但 JWXT ticket 请求连续 {} 次失败（{}；{}）。'.format(
+                    len(proxy_attempts), self.proxy_description, last_error
+                )
+            ) from last_error
+        for cookie in self.requests_session.cookies:
+            self.cookie_jar.set_cookie(cookie)
+        self.__mark_login('JWXT-SSO-OK', 'CAS 已重定向至 JWXT SSO。')
         self.post_login()
 
     def in_login(self, username, password):
@@ -410,13 +651,22 @@ class course_selector:
 
     def post_login(self):
         """Confirm the JWXT session and obtain the active course-selection term."""
+        response_keys = ()
         for path in self.info_paths:
-            result = self.__request_json(path, 'JWXT session initialization')
+            result = self.__request_json(path, 'JWXT session initialization ({})'.format(path))
             if path.endswith('selectCourseInfo'):
                 self.selection_stage = result.get('data') or {}
+                if not isinstance(self.selection_stage, dict):
+                    self.selection_stage = {}
                 self.semester_year = self.selection_stage.get('semesterYear')
+                response_keys = tuple(sorted(self.selection_stage))
+        self.__mark_login('JWXT-SESSION-OK', 'JWXT 会话初始化接口已响应。')
         if not self.semester_year:
-            raise CourseSelectorError('JWXT did not return an active course-selection term.')
+            self.__mark_login('JWXT-NO-ACTIVE-TERM', 'JWXT 未返回 semesterYear。')
+            raise JWXTNoActiveCourseSelectionTerm(self.selection_stage, response_keys)
+        self.__mark_login('JWXT-ACTIVE-TERM-OK', '活动选课学期：{}。'.format(self.semester_year))
+        if str(self.selection_stage.get('courseSelectType')) == '0':
+            self.__mark_login('JWXT-COURSE-SELECTION-CLOSED', 'JWXT 已返回学期，但当前选课未开放。')
 
     @property
     def sports_volunteer_enabled(self):
@@ -448,6 +698,7 @@ class course_selector:
                 )
             )
         self.selected_stage_mode = mode
+        self.__mark_login('JWXT-STAGE-OK', '已确认{}。'.format(self.SELECTION_MODES[mode]))
 
     @property
     def is_preselection_stage(self):

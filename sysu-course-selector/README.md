@@ -14,6 +14,8 @@ python cli.py                  # CLI，凭据来自本地 info.py
 
 Windows 可双击 `run.bat`。`info.py` 仅保留占位符并忽略本地真实凭据。
 
+代理配置：GUI 默认使用“系统代理”，会自动读取 Windows 当前代理；若本机 HTTP 代理固定在 `127.0.0.1:7897`，也可选择“HTTP 代理”并填写端口 `7897`。CLI 可在 `setting.py` 中设置 `PROXY_MODE`（`system/http/socks5/none`）、`PROXY_HOST` 和 `PROXY_PORT`。
+
 ## 认证与会话
 
 核心实现位于 `scs.py`，每个 `course_selector` 实例持有独立的内存 CookieJar；不读取、写入或共享浏览器 Cookie。
@@ -31,6 +33,11 @@ JWXT SSO 目标为：
 ```
 
 登录后通过学生信息、选课信息等接口初始化当前学期与选课阶段。
+
+登录过程会记录不含凭据的诊断标志：`CAS-POLICY-OK`、`CAS-PASSWORD-OK`、`CAS-MFA-*`、`JWXT-SSO-OK`、`JWXT-SESSION-OK` 与 `JWXT-ACTIVE-TERM-OK`。其中：
+
+- `JWXT-NO-ACTIVE-TERM`：CAS 和 JWXT 会话已建立，但 `selectCourseInfo` 未返回 `semesterYear`；通常是当前没有面向该账号的活动选课批次，也可能是 JWXT 接口字段变动，**不是 CAS 登录失败**。
+- `JWXT-COURSE-SELECTION-CLOSED`：已取得 `semesterYear`，但 `courseSelectType=0`；登录成功，但当前选课未开放。
 
 ### CAS MFA：企业微信验证码
 
